@@ -1133,6 +1133,140 @@ export { optionalMethod as default };
 "
 `;
 
+exports[`fixtures > tests/fixtures/pick-omit-alias.vue > isProduction = false 1`] = `
+"// pick-omit-alias.js
+import { defineComponent } from 'vue';
+import _export_sfc from '[NULL]/plugin-vue/export-helper';
+
+var _sfc_main = /* @__PURE__ */ defineComponent({
+	__name: "pick-omit-alias",
+	props: {
+		id: {
+			type: String,
+			required: true
+		},
+		name: {
+			type: String,
+			required: true
+		},
+		mode: {
+			type: String,
+			required: true
+		}
+	},
+	setup(__props, { expose: __expose }) {
+		__expose();
+		const __returned__ = {};
+		Object.defineProperty(__returned__, "__isScriptSetup", {
+			enumerable: false,
+			value: true
+		});
+		return __returned__;
+	}
+});
+
+var pickOmitAlias = /* @__PURE__ */ _export_sfc(_sfc_main, [__FILE__]);
+
+export { pickOmitAlias as default };
+"
+`;
+
+exports[`fixtures > tests/fixtures/pick-omit-alias.vue > isProduction = true 1`] = `
+"// pick-omit-alias.js
+import { defineComponent } from 'vue';
+import _export_sfc from '[NULL]/plugin-vue/export-helper';
+
+var _sfc_main = /* @__PURE__ */ defineComponent({
+	__name: "pick-omit-alias",
+	props: {
+		id: null,
+		name: null,
+		mode: null
+	},
+	setup(__props, { expose: __expose }) {
+		__expose();
+		const __returned__ = {};
+		Object.defineProperty(__returned__, "__isScriptSetup", {
+			enumerable: false,
+			value: true
+		});
+		return __returned__;
+	}
+});
+
+var pickOmitAlias = /* @__PURE__ */ _export_sfc(_sfc_main, [__FILE__]);
+
+export { pickOmitAlias as default };
+"
+`;
+
+exports[`fixtures > tests/fixtures/pick-omit-import.vue > isProduction = false 1`] = `
+"// pick-omit-import.js
+import { defineComponent } from 'vue';
+import _export_sfc from '[NULL]/plugin-vue/export-helper';
+
+var _sfc_main = /* @__PURE__ */ defineComponent({
+	__name: "pick-omit-import",
+	props: {
+		id: {
+			type: String,
+			required: true
+		},
+		name: {
+			type: String,
+			required: true
+		},
+		mode: {
+			type: String,
+			required: true
+		}
+	},
+	setup(__props, { expose: __expose }) {
+		__expose();
+		const __returned__ = {};
+		Object.defineProperty(__returned__, "__isScriptSetup", {
+			enumerable: false,
+			value: true
+		});
+		return __returned__;
+	}
+});
+
+var pickOmitImport = /* @__PURE__ */ _export_sfc(_sfc_main, [__FILE__]);
+
+export { pickOmitImport as default };
+"
+`;
+
+exports[`fixtures > tests/fixtures/pick-omit-import.vue > isProduction = true 1`] = `
+"// pick-omit-import.js
+import { defineComponent } from 'vue';
+import _export_sfc from '[NULL]/plugin-vue/export-helper';
+
+var _sfc_main = /* @__PURE__ */ defineComponent({
+	__name: "pick-omit-import",
+	props: {
+		id: null,
+		name: null,
+		mode: null
+	},
+	setup(__props, { expose: __expose }) {
+		__expose();
+		const __returned__ = {};
+		Object.defineProperty(__returned__, "__isScriptSetup", {
+			enumerable: false,
+			value: true
+		});
+		return __returned__;
+	}
+});
+
+var pickOmitImport = /* @__PURE__ */ _export_sfc(_sfc_main, [__FILE__]);
+
+export { pickOmitImport as default };
+"
+`;
+
 exports[`fixtures > tests/fixtures/playground.vue > isProduction = false 1`] = `
 "// playground.js
 import { defineComponent } from 'vue';

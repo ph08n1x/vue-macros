@@ -54,6 +54,15 @@ export function resolveTSReferencedType(
 > {
   return safeTry(async function* () {
     const { scope, type } = ref
+    if (process.env.VUE_MACROS_DEBUG) {
+      // eslint-disable-next-line no-console
+      console.warn('[vue-macros][resolve-ref] enter', {
+        scopeKind: scope.kind,
+        type: type.type,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        name: (type as any).id?.name,
+      })
+    }
     if (stacks.some((stack) => stack.scope === scope && stack.type === type)) {
       return ok(ref as any)
     }
@@ -90,6 +99,12 @@ export function resolveTSReferencedType(
     const refNames = resolveIdentifier(
       type.type === 'TSTypeReference' ? type.typeName : type,
     )
+    if (process.env.VUE_MACROS_DEBUG) {
+      // eslint-disable-next-line no-console
+      console.warn('[vue-macros][resolve-ref] resolveIdentifier', {
+        refNames,
+      })
+    }
 
     let resolved: TSResolvedType | TSNamespace | undefined =
       resolveTSScope(scope).declarations!
@@ -98,10 +113,24 @@ export function resolveTSReferencedType(
       if (isTSNamespace(resolved) && resolved[name]) {
         resolved = resolved[name]
       } else if (type.type === 'TSTypeReference') {
+        if (process.env.VUE_MACROS_DEBUG) {
+          // eslint-disable-next-line no-console
+          console.warn('[vue-macros][resolve-ref] unresolved', {
+            name,
+            refNames,
+          })
+        }
         return ok({ type, scope })
       }
     }
 
+    if (process.env.VUE_MACROS_DEBUG) {
+      // eslint-disable-next-line no-console
+      console.warn('[vue-macros][resolve-ref] resolved', {
+        refNames,
+        resolvedKind: isTSNamespace(resolved) ? 'namespace' : 'type',
+      })
+    }
     return ok(resolved)
   })
 }

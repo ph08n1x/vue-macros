@@ -46,12 +46,24 @@ const plugin: UnpluginInstance<Options | undefined, false> = createUnplugin(
     const options = resolveOptions(userOptions, framework)
     const filter = createFilter(options)
 
+    if (process.env.VUE_MACROS_DEBUG) {
+      // eslint-disable-next-line no-console
+      console.warn('[vue-macros][better-define] plugin init', {
+        framework,
+        isProduction: options.isProduction,
+      })
+    }
+
     return {
       name,
       enforce: 'pre',
 
       transformInclude: filter,
       transform(code, id) {
+        if (process.env.VUE_MACROS_DEBUG) {
+          // eslint-disable-next-line no-console
+          console.warn('[vue-macros][better-define] transform', id)
+        }
         return transformBetterDefine(code, id, options.isProduction).match(
           (res) => res,
           (error) => {

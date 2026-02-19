@@ -1,9 +1,11 @@
+import fs from 'node:fs'
 import path from 'node:path'
 import { tsFileCache } from './scope'
 import type { ResolverFactory } from 'oxc-resolver'
 import type { ModuleNode, Plugin } from 'vite'
 
-let typesResolver: ResolverFactory
+let fallbackResolver: ResolverFactory
+const resolverByTsconfig = new Map<string, ResolverFactory>()
 
 const referencedFiles = new Map<string /* file */, Set<string /* importer */>>()
 
@@ -28,16 +30,8 @@ export async function resolveDts(
   const cached = resolveCache.get(importer)?.get(id)
   if (cached) return cached
 
-  if (!typesResolver) {
-    const { ResolverFactory } = await import('oxc-resolver')
-    typesResolver = new ResolverFactory({
-      mainFields: ['types'],
-      conditionNames: ['types', 'import'],
-      extensions: ['.d.ts', '.ts'],
-    })
-  }
-
-  const { error, path: resolved } = await typesResolver.async(
+  const resolver = await getResolver(importer)
+  const { error, path: resolved } = await resolver.async(
     path.dirname(importer),
     id,
   )
@@ -50,6 +44,49 @@ export async function resolveDts(
     resolveCache.set(importer, new Map([[id, resolved]]))
   }
   return resolved
+}
+
+async function getResolver(importer: string): Promise<ResolverFactory> {
+  const { ResolverFactory } = await import('oxc-resolver')
+  const tsconfigFile = findNearestTsconfig(path.dirname(importer))
+
+  if (!tsconfigFile) {
+    if (!fallbackResolver) {
+      fallbackResolver = new ResolverFactory({
+        mainFields: ['types'],
+        conditionNames: ['types', 'import'],
+        extensions: ['.d.ts', '.ts'],
+      })
+    }
+    return fallbackResolver
+  }
+
+  const cached = resolverByTsconfig.get(tsconfigFile)
+  if (cached) return cached
+
+  const resolver = new ResolverFactory({
+    mainFields: ['types'],
+    conditionNames: ['types', 'import'],
+    extensions: ['.d.ts', '.ts'],
+    tsconfig: {
+      configFile: tsconfigFile,
+      references: 'auto',
+    },
+  })
+  resolverByTsconfig.set(tsconfigFile, resolver)
+  return resolver
+}
+
+function findNearestTsconfig(fromDir: string): string | undefined {
+  let current = fromDir
+  while (true) {
+    const tsconfig = path.join(current, 'tsconfig.json')
+    if (fs.existsSync(tsconfig)) return tsconfig
+
+    const parent = path.dirname(current)
+    if (parent === current) return
+    current = parent
+  }
 }
 
 export const resolveDtsHMR: NonNullable<Plugin['handleHotUpdate']> = ({

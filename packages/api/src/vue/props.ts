@@ -2,6 +2,7 @@ import {
   babelParse,
   isStaticObjectKey,
   isTypeOf,
+  resolveLiteral,
   resolveIdentifier,
   resolveObjectExpression,
   resolveString,
@@ -12,8 +13,11 @@ import {
 import { err, ok, safeTry, type ResultAsync } from 'neverthrow'
 import {
   isTSNamespace,
+  resolveMaybeTSUnion,
+  resolveTSLiteralType,
   resolveTSProperties,
   resolveTSReferencedType,
+  resolveTSTypeOperator,
   resolveTSScope,
   type TSFile,
   type TSNamespace,
@@ -53,10 +57,41 @@ type BuiltInTypesHandler = Record<
     handleTSProperties?: (properties: TSProperties) => TSProperties
   }
 >
+function getTypeRefParams(resolved: TSTypeReference): TSType[] | undefined {
+  // @babel/parser has had multiple shapes over time:
+  // - typeParameters: { params: TSType[] }
+  // - typeArguments: { params: TSType[] }
+  // - typeParameters/typeArguments: TSType[]
+  const typeParameters = resolved.typeParameters
+  if (Array.isArray(typeParameters)) return typeParameters as TSType[]
+  if (typeParameters?.params) return typeParameters.params
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const typeArguments = (resolved as any).typeArguments
+  if (Array.isArray(typeArguments)) return typeArguments as TSType[]
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  if (typeArguments?.params) return typeArguments.params
+
+  return undefined
+}
+
+function getUnresolvedTypeRefName(
+  scope: TSScope,
+  type: TSType,
+): string | undefined {
+  if (type.type !== 'TSTypeReference') return
+  const names = resolveIdentifier(type.typeName)
+  const root = names[0]
+  const declarations = resolveTSScope(scope).declarations
+  if (!declarations || !root || !(root in declarations)) {
+    return names.join('.')
+  }
+  return
+}
 const builtInTypesHandlers: BuiltInTypesHandler = {
   Partial: {
     handleType(resolved) {
-      return resolved.typeParameters?.params[0]
+      return getTypeRefParams(resolved)?.[0]
     },
     handleTSProperties(properties) {
       for (const prop of Object.values(properties.properties)) {
@@ -67,7 +102,7 @@ const builtInTypesHandlers: BuiltInTypesHandler = {
   },
   Required: {
     handleType(resolved) {
-      return resolved.typeParameters?.params[0]
+      return getTypeRefParams(resolved)?.[0]
     },
     handleTSProperties(properties) {
       for (const prop of Object.values(properties.properties)) {
@@ -78,10 +113,9 @@ const builtInTypesHandlers: BuiltInTypesHandler = {
   },
   Readonly: {
     handleType(resolved) {
-      return resolved.typeParameters?.params[0]
+      return getTypeRefParams(resolved)?.[0]
     },
   },
-  // TODO: pick, omit
 }
 
 export function handleTSPropsDefinition({
@@ -475,6 +509,12 @@ export function handleTSPropsDefinition({
     TransformError<ErrorResolveTS | ErrorUnknownNode>
   > {
     return safeTry(async function* () {
+      if (process.env.VUE_MACROS_DEBUG) {
+        // eslint-disable-next-line no-console
+        console.warn('[vue-macros][resolve-defs] start', {
+          type: typeDeclRaw.type.type,
+        })
+      }
       let resolved:
         | TSResolvedType
         | TSResolvedType<TSType>
@@ -483,6 +523,12 @@ export function handleTSPropsDefinition({
         (yield* resolveTSReferencedType(typeDeclRaw)) || typeDeclRaw
 
       let builtInTypesHandler: BuiltInTypesHandler[string] | undefined
+      let pickOmitKeys:
+        | {
+            typeName: 'Pick' | 'Omit'
+            keys: Set<string>
+          }
+        | undefined
 
       if (
         resolved &&
@@ -496,6 +542,24 @@ export function handleTSPropsDefinition({
         if (typeName in builtInTypesHandlers) {
           builtInTypesHandler = builtInTypesHandlers[typeName]
           type = builtInTypesHandler.handleType(resolved.type)
+        } else if (typeName === 'Pick' || typeName === 'Omit') {
+          if (process.env.VUE_MACROS_DEBUG) {
+            const params = getTypeRefParams(resolved.type)
+            // eslint-disable-next-line no-console
+            console.warn('[vue-macros][pick-omit] resolveDefinitions', {
+              typeName,
+              paramsIsArray: Array.isArray(params),
+              paramsLength: params?.length,
+              typeParameters: resolved.type.typeParameters,
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              typeArguments: (resolved.type as any).typeArguments,
+            })
+          }
+          type = getTypeRefParams(resolved.type)?.[0]
+          pickOmitKeys = {
+            typeName,
+            keys: yield* resolvePickOmitKeys(typeName, resolved),
+          }
         }
 
         if (type)
@@ -506,10 +570,33 @@ export function handleTSPropsDefinition({
       }
 
       if (!resolved || isTSNamespace(resolved)) {
+        const unresolved = getUnresolvedTypeRefName(
+          typeDeclRaw.scope,
+          typeDeclRaw.type,
+        )
+        if (process.env.VUE_MACROS_DEBUG) {
+          // eslint-disable-next-line no-console
+          console.warn('[vue-macros][resolve-defs] unresolved', {
+            unresolved,
+          })
+        }
+        if (unresolved) {
+          return err(
+            new TransformError(
+              `Cannot resolve TS type: ${unresolved} (unresolved reference; check imports/tsconfig paths)`,
+            ),
+          )
+        }
         return err(new TransformError('Cannot resolve TS definition.'))
       }
 
       const { type: definitionsAst, scope } = resolved
+      if (process.env.VUE_MACROS_DEBUG) {
+        // eslint-disable-next-line no-console
+        console.warn('[vue-macros][resolve-defs] resolvedAst', {
+          type: definitionsAst.type,
+        })
+      }
       if (definitionsAst.type === 'TSIntersectionType') {
         return resolveIntersection(definitionsAst, scope)
       } else if (definitionsAst.type === 'TSUnionType') {
@@ -519,19 +606,19 @@ export function handleTSPropsDefinition({
         definitionsAst.type !== 'TSTypeLiteral' &&
         definitionsAst.type !== 'TSMappedType'
       ) {
-        return definitionsAst.type === 'TSTypeReference'
-          ? err(
-              new TransformError(
-                `Cannot resolve TS type: ${resolveIdentifier(
-                  definitionsAst.typeName,
-                ).join('.')}`,
-              ),
-            )
-          : err(
-              new TransformError(
-                `Cannot resolve TS definition: ${definitionsAst.type}`,
-              ),
-            )
+        if (definitionsAst.type === 'TSTypeReference') {
+          const typeName = resolveIdentifier(definitionsAst.typeName).join('.')
+          const unresolved = getUnresolvedTypeRefName(scope, definitionsAst)
+          const hint = unresolved
+            ? ' (unresolved reference; check imports/tsconfig paths)'
+            : ' (unsupported type reference)'
+          return err(new TransformError(`Cannot resolve TS type: ${typeName}${hint}`))
+        }
+        return err(
+          new TransformError(
+            `Cannot resolve TS definition: ${definitionsAst.type} (unsupported node)`,
+          ),
+        )
       }
 
       let properties = yield* resolveTSProperties({
@@ -541,6 +628,8 @@ export function handleTSPropsDefinition({
 
       if (builtInTypesHandler?.handleTSProperties)
         properties = builtInTypesHandler.handleTSProperties(properties)
+      if (pickOmitKeys)
+        properties = filterPickOmitProperties(properties, pickOmitKeys)
 
       return ok({
         definitions: yield* resolveNormal(properties),
@@ -563,6 +652,105 @@ export function handleTSPropsDefinition({
     if (!defaults) return { defaultsAst }
 
     return { defaults, defaultsAst }
+  }
+
+  function resolvePickOmitKeys(
+    typeName: 'Pick' | 'Omit',
+    resolved: TSResolvedType<TSTypeReference>,
+  ): ResultAsync<Set<string>, TransformError<ErrorResolveTS | ErrorUnknownNode>> {
+    return safeTry(async function* () {
+      const params = getTypeRefParams(resolved.type)
+      const keysType = params?.[1]
+      if (process.env.VUE_MACROS_DEBUG || process.env.VUE_MACROS_DEBUG_PICK_OMIT) {
+        // eslint-disable-next-line no-console
+        console.warn('[vue-macros][pick-omit]', {
+          typeName,
+          typeParameters: resolved.type.typeParameters,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          typeArguments: (resolved.type as any).typeArguments,
+          paramsIsArray: Array.isArray(params),
+          paramsLength: params?.length,
+          keysType: keysType?.type,
+        })
+      }
+      if (!keysType) {
+        return err(
+          new TransformError(
+            `Cannot resolve TS type: ${typeName} (missing type parameters)`,
+          ),
+        )
+      }
+
+      const keyResolved =
+        (yield* resolveTSReferencedType({
+          type: keysType,
+          scope: resolved.scope,
+        })) || { type: keysType, scope: resolved.scope }
+
+      const keys = new Set<string>()
+      for (const subType of resolveMaybeTSUnion(keyResolved.type)) {
+        if (subType.type === 'TSLiteralType') {
+          const literal = yield* resolveTSLiteralType({
+            type: subType,
+            scope: keyResolved.scope,
+          })
+          if (!literal) continue
+
+          for (const l of resolveMaybeTSUnion(literal))
+            keys.add(String(resolveLiteral(l)))
+        } else if (subType.type === 'TSTypeOperator') {
+          const keyLiterals = yield* resolveTSTypeOperator({
+            type: subType,
+            scope: keyResolved.scope,
+          })
+          if (!keyLiterals) continue
+
+          for (const l of keyLiterals)
+            keys.add(String(resolveLiteral(l)))
+        }
+      }
+
+      if (keys.size === 0) {
+        return err(
+          new TransformError(
+            `Cannot resolve TS type: ${typeName} (unsupported key type)`,
+          ),
+        )
+      }
+
+      return ok(keys)
+    })
+  }
+
+  function filterPickOmitProperties(
+    properties: TSProperties,
+    pickOmit: {
+      typeName: 'Pick' | 'Omit'
+      keys: Set<string>
+    },
+  ): TSProperties {
+    const shouldKeep = (key: string) =>
+      pickOmit.typeName === 'Pick'
+        ? pickOmit.keys.has(key)
+        : !pickOmit.keys.has(key)
+
+    const filteredMethods: TSProperties['methods'] = Object.create(null)
+    for (const [key, value] of Object.entries(properties.methods)) {
+      if (shouldKeep(String(key)))
+        filteredMethods[key] = value
+    }
+
+    const filteredProperties: TSProperties['properties'] = Object.create(null)
+    for (const [key, value] of Object.entries(properties.properties)) {
+      if (shouldKeep(String(key)))
+        filteredProperties[key] = value
+    }
+
+    return {
+      ...properties,
+      methods: filteredMethods,
+      properties: filteredProperties,
+    }
   }
 }
 
