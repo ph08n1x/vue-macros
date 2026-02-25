@@ -48,6 +48,7 @@ export function isSupportedForTSReferencedType(
 export function resolveTSReferencedType(
   ref: TSResolvedType<TSReferencedType>,
   stacks: TSResolvedType<any>[] = [],
+  namespaceToken?: symbol,
 ): ResultAsync<
   TSResolvedType | TSNamespace | undefined,
   TransformError<ErrorUnknownNode>
@@ -74,9 +75,10 @@ export function resolveTSReferencedType(
         return resolveTSReferencedType(
           { scope, type: type.typeAnnotation },
           stacks,
+          namespaceToken,
         )
       case 'TSIndexedAccessType':
-        return resolveTSIndexedAccessType({ type, scope }, stacks)
+        return resolveTSIndexedAccessType({ type, scope }, stacks, namespaceToken)
 
       case 'TSModuleDeclaration': {
         if (type.body.type === 'TSModuleBlock') {
@@ -85,7 +87,7 @@ export function resolveTSReferencedType(
             ast: type.body,
             scope,
           }
-          yield* resolveTSNamespace(newScope)
+          yield* resolveTSNamespace(newScope, namespaceToken)
           return ok(newScope.exports)
         }
         return ok()
@@ -95,7 +97,7 @@ export function resolveTSReferencedType(
     if (type.type !== 'Identifier' && type.type !== 'TSTypeReference')
       return ok({ scope, type })
 
-    yield* resolveTSNamespace(scope)
+    yield* resolveTSNamespace(scope, namespaceToken)
     const refNames = resolveIdentifier(
       type.type === 'TSTypeReference' ? type.typeName : type,
     )

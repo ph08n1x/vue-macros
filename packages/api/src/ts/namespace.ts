@@ -14,7 +14,10 @@ export type TSNamespace = {
   [K in string]: TSResolvedType | TSNamespace | undefined
 } & { [namespaceSymbol]: true }
 
-const namespaceResolveTasks = new WeakMap<TSScope, Promise<void>>()
+const namespaceResolveTasks = new WeakMap<
+  TSScope,
+  { token: symbol; task: Promise<void> }
+>()
 
 export function isTSNamespace(val: unknown): val is TSNamespace {
   return !!val && typeof val === 'object' && namespaceSymbol in val
@@ -27,11 +30,14 @@ export function isTSNamespace(val: unknown): val is TSNamespace {
  */
 export function resolveTSNamespace(
   scope: TSScope,
+  namespaceToken: symbol = Symbol('namespace-resolve'),
 ): ResultAsync<void, TransformError<ErrorUnknownNode>> {
   return safeTry(async function* () {
     const inFlight = namespaceResolveTasks.get(scope)
     if (inFlight) {
-      await inFlight
+      // Re-entrant resolution from the same chain should not wait on itself.
+      if (inFlight.token === namespaceToken) return ok()
+      await inFlight.task
       return ok()
     }
     if (scope.exports) return ok()
@@ -40,7 +46,7 @@ export function resolveTSNamespace(
     const task = new Promise<void>((resolve) => {
       completeTask = resolve
     })
-    namespaceResolveTasks.set(scope, task)
+    namespaceResolveTasks.set(scope, { token: namespaceToken, task })
 
     try {
       const exports: TSNamespace = {
@@ -63,13 +69,13 @@ export function resolveTSNamespace(
           exports.default = yield* resolveTSReferencedType({
             scope,
             type: stmt.declaration,
-          })
+          }, [], namespaceToken)
         } else if (stmt.type === 'ExportAllDeclaration') {
           const resolved = await resolveDts(stmt.source.value, file.filePath)
           if (!resolved) continue
 
           const sourceScope = await getTSFile(resolved)
-          yield* resolveTSNamespace(sourceScope)
+          yield* resolveTSNamespace(sourceScope, namespaceToken)
 
           Object.assign(exports, sourceScope.exports!)
         } else if (stmt.type === 'ExportNamedDeclaration') {
@@ -80,7 +86,7 @@ export function resolveTSNamespace(
             if (!resolved) continue
 
             const scope = await getTSFile(resolved)
-            yield* resolveTSNamespace(scope)
+            yield* resolveTSNamespace(scope, namespaceToken)
             sourceExports = scope.exports!
           } else {
             sourceExports = declarations
@@ -136,7 +142,7 @@ export function resolveTSNamespace(
                 yield* resolveTSReferencedType({
                   scope,
                   type: decl,
-                })
+                }, [], namespaceToken)
             }
           }
         } else if (isTSDeclaration(stmt)) {
@@ -145,13 +151,13 @@ export function resolveTSNamespace(
           declarations[stmt.id.name] = yield* resolveTSReferencedType({
             scope,
             type: stmt,
-          })
+          }, [], namespaceToken)
         } else if (stmt.type === 'ImportDeclaration') {
           const resolved = await resolveDts(stmt.source.value, file.filePath)
           if (!resolved) continue
 
           const importScope = await getTSFile(resolved)
-          yield* resolveTSNamespace(importScope)
+          yield* resolveTSNamespace(importScope, namespaceToken)
           const exports = importScope.exports!
 
           for (const specifier of stmt.specifiers) {

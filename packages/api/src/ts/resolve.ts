@@ -183,6 +183,7 @@ export function resolveTypeElements(
 export function resolveTSIndexedAccessType(
   { scope, type }: TSResolvedType<TSIndexedAccessType>,
   stacks: TSResolvedType<any>[] = [],
+  namespaceToken?: symbol,
 ): ResultAsync<
   { type: TSUnionType; scope: TSScope } | void,
   TransformError<ErrorUnknownNode>
@@ -191,6 +192,7 @@ export function resolveTSIndexedAccessType(
     const object = yield* resolveTSReferencedType(
       { type: type.objectType, scope },
       stacks,
+      namespaceToken,
     )
     if (!object || isTSNamespace(object)) return ok()
 
@@ -247,10 +249,14 @@ export function resolveTSIndexedAccessType(
           String(resolveLiteral(literal)),
         )
       } else if (index.type === 'TSTypeOperator') {
-        const keysStrings = yield* resolveTSTypeOperator({
-          type: index,
-          scope: object.scope,
-        })
+        const keysStrings = yield* resolveTSTypeOperator(
+          {
+            type: index,
+            scope: object.scope,
+          },
+          stacks,
+          namespaceToken,
+        )
         if (!keysStrings) continue
         keys = resolveMaybeTSUnion(keysStrings).map((literal) =>
           String(resolveLiteral(literal)),
@@ -290,6 +296,7 @@ export function resolveTSIndexedAccessType(
 export function resolveTSTypeOperator(
   { scope, type }: TSResolvedType<TSTypeOperator>,
   stacks: TSResolvedType<any>[] = [],
+  namespaceToken?: symbol,
 ): ResultAsync<StringLiteral[] | void, TransformError<ErrorUnknownNode>> {
   return safeTry(async function* () {
     if (type.operator !== 'keyof') return ok()
@@ -300,6 +307,7 @@ export function resolveTSTypeOperator(
         scope,
       },
       stacks,
+      namespaceToken,
     )
     if (!resolved || isTSNamespace(resolved)) return ok()
     const { type: resolvedType, scope: resolvedScope } = resolved
