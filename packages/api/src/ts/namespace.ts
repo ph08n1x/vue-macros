@@ -11,6 +11,13 @@ export type TSNamespace = {
   [K in string]: TSResolvedType | TSNamespace | undefined
 } & { [namespaceSymbol]: true }
 
+const namespaceResolveTasks = new WeakMap<TSScope, Promise<void>>()
+const namespaceResolveOwners = new WeakMap<TSScope, symbol>()
+
+export interface NamespaceResolveOptions {
+  namespaceToken?: symbol
+}
+
 export function isTSNamespace(val: unknown): val is TSNamespace {
   return !!val && typeof val === 'object' && namespaceSymbol in val
 }
@@ -20,124 +27,155 @@ export function isTSNamespace(val: unknown): val is TSNamespace {
  *
  * @limitation don't support non-TS declaration (e.g. class, function...)
  */
-export async function resolveTSNamespace(scope: TSScope): Promise<void> {
+export async function resolveTSNamespace(
+  scope: TSScope,
+  options: NamespaceResolveOptions = {},
+): Promise<void> {
+  const inFlight = namespaceResolveTasks.get(scope)
+  if (inFlight) {
+    const owner = namespaceResolveOwners.get(scope)
+    if (owner && options.namespaceToken && owner === options.namespaceToken) {
+      return
+    }
+    await inFlight
+    return
+  }
   if (scope.exports) return
 
-  const exports: TSNamespace = {
-    [namespaceSymbol]: true,
-  }
-  scope.exports = exports
+  const namespaceToken = options.namespaceToken ?? Symbol('namespace-resolve')
+  let completeTask!: () => void
+  let failTask!: (error: unknown) => void
+  const task = new Promise<void>((resolve, reject) => {
+    completeTask = resolve
+    failTask = reject
+  })
+  namespaceResolveTasks.set(scope, task)
+  namespaceResolveOwners.set(scope, namespaceToken)
 
-  const declarations: TSNamespace = {
-    [namespaceSymbol]: true,
-    ...scope.declarations,
-  }
-  scope.declarations = declarations
+  try {
+    const exports: TSNamespace = {
+      [namespaceSymbol]: true,
+    }
+    scope.exports = exports
 
-  const { body, file } = resolveTSScope(scope)
-  for (const stmt of body || []) {
-    if (
-      stmt.type === 'ExportDefaultDeclaration' &&
-      isTSDeclaration(stmt.declaration)
-    ) {
-      exports.default = await resolveTSReferencedType({
-        scope,
-        type: stmt.declaration,
-      })
-    } else if (stmt.type === 'ExportAllDeclaration') {
-      const resolved = await resolveDts(stmt.source.value, file.filePath)
-      if (!resolved) continue
+    const declarations: TSNamespace = {
+      [namespaceSymbol]: true,
+      ...scope.declarations,
+    }
+    scope.declarations = declarations
 
-      const sourceScope = await getTSFile(resolved)
-      await resolveTSNamespace(sourceScope)
-
-      Object.assign(exports, sourceScope.exports!)
-    } else if (stmt.type === 'ExportNamedDeclaration') {
-      let sourceExports: TSNamespace
-
-      if (stmt.source) {
+    const { body, file } = resolveTSScope(scope)
+    for (const stmt of body || []) {
+      if (
+        stmt.type === 'ExportDefaultDeclaration' &&
+        isTSDeclaration(stmt.declaration)
+      ) {
+        exports.default = await resolveTSReferencedType({
+          scope,
+          type: stmt.declaration,
+        }, [], { namespaceToken })
+      } else if (stmt.type === 'ExportAllDeclaration') {
         const resolved = await resolveDts(stmt.source.value, file.filePath)
         if (!resolved) continue
 
-        const scope = await getTSFile(resolved)
-        await resolveTSNamespace(scope)
-        sourceExports = scope.exports!
-      } else {
-        sourceExports = declarations
-      }
+        const sourceScope = await getTSFile(resolved)
+        await resolveTSNamespace(sourceScope, { namespaceToken })
 
-      for (const specifier of stmt.specifiers) {
-        let exported: TSNamespace[string]
-        if (specifier.type === 'ExportDefaultSpecifier') {
-          // export x from 'xxx'
-          exported = sourceExports.default
-        } else if (specifier.type === 'ExportNamespaceSpecifier') {
-          // export * as x from 'xxx'
-          exported = sourceExports
-        } else if (specifier.type === 'ExportSpecifier') {
-          // export { x } from 'xxx'
-          exported = sourceExports![specifier.local.name]
+        Object.assign(exports, sourceScope.exports!)
+      } else if (stmt.type === 'ExportNamedDeclaration') {
+        let sourceExports: TSNamespace
+
+        if (stmt.source) {
+          const resolved = await resolveDts(stmt.source.value, file.filePath)
+          if (!resolved) continue
+
+          const scope = await getTSFile(resolved)
+          await resolveTSNamespace(scope, { namespaceToken })
+          sourceExports = scope.exports!
         } else {
-          throw new Error(`Unknown export type: ${(specifier as any).type}`)
+          sourceExports = declarations
         }
 
-        const name =
-          specifier.exported.type === 'Identifier'
-            ? specifier.exported.name
-            : specifier.exported.value
-        exports[name] = exported
-      }
+        for (const specifier of stmt.specifiers) {
+          let exported: TSNamespace[string]
+          if (specifier.type === 'ExportDefaultSpecifier') {
+            // export x from 'xxx'
+            exported = sourceExports.default
+          } else if (specifier.type === 'ExportNamespaceSpecifier') {
+            // export * as x from 'xxx'
+            exported = sourceExports
+          } else if (specifier.type === 'ExportSpecifier') {
+            // export { x } from 'xxx'
+            exported = sourceExports![specifier.local.name]
+          } else {
+            throw new Error(`Unknown export type: ${(specifier as any).type}`)
+          }
 
-      // export interface A {}
-      if (isTSDeclaration(stmt.declaration)) {
-        const decl = stmt.declaration
-
-        if (decl.id?.type === 'Identifier') {
-          const exportedName = decl.id.name
-          declarations[exportedName] = exports[exportedName] =
-            await resolveTSReferencedType({
-              scope,
-              type: decl,
-            })
-        }
-      }
-    }
-
-    // declarations
-    else if (isTSDeclaration(stmt)) {
-      if (stmt.id?.type !== 'Identifier') continue
-
-      declarations[stmt.id.name] = await resolveTSReferencedType({
-        scope,
-        type: stmt,
-      })
-    } else if (stmt.type === 'ImportDeclaration') {
-      const resolved = await resolveDts(stmt.source.value, file.filePath)
-      if (!resolved) continue
-
-      const importScope = await getTSFile(resolved)
-      await resolveTSNamespace(importScope)
-      const exports = importScope.exports!
-
-      for (const specifier of stmt.specifiers) {
-        const local = specifier.local.name
-
-        let imported: TSNamespace[string]
-        if (specifier.type === 'ImportDefaultSpecifier') {
-          imported = exports.default
-        } else if (specifier.type === 'ImportNamespaceSpecifier') {
-          imported = exports
-        } else if (specifier.type === 'ImportSpecifier') {
           const name =
-            specifier.imported.type === 'Identifier'
-              ? specifier.imported.name
-              : specifier.imported.value
-          imported = exports[name]
-        } else {
-          throw new Error(`Unknown import type: ${(specifier as any).type}`)
+            specifier.exported.type === 'Identifier'
+              ? specifier.exported.name
+              : specifier.exported.value
+          exports[name] = exported
         }
-        declarations[local] = imported
+
+        // export interface A {}
+        if (isTSDeclaration(stmt.declaration)) {
+          const decl = stmt.declaration
+
+          if (decl.id?.type === 'Identifier') {
+            const exportedName = decl.id.name
+            declarations[exportedName] = exports[exportedName] =
+              await resolveTSReferencedType({
+                scope,
+                type: decl,
+              }, [], { namespaceToken })
+          }
+        }
+      }
+
+      // declarations
+      else if (isTSDeclaration(stmt)) {
+        if (stmt.id?.type !== 'Identifier') continue
+
+        declarations[stmt.id.name] = await resolveTSReferencedType({
+          scope,
+          type: stmt,
+        }, [], { namespaceToken })
+      } else if (stmt.type === 'ImportDeclaration') {
+        const resolved = await resolveDts(stmt.source.value, file.filePath)
+        if (!resolved) continue
+
+        const importScope = await getTSFile(resolved)
+        await resolveTSNamespace(importScope, { namespaceToken })
+        const exports = importScope.exports!
+
+        for (const specifier of stmt.specifiers) {
+          const local = specifier.local.name
+
+          let imported: TSNamespace[string]
+          if (specifier.type === 'ImportDefaultSpecifier') {
+            imported = exports.default
+          } else if (specifier.type === 'ImportNamespaceSpecifier') {
+            imported = exports
+          } else if (specifier.type === 'ImportSpecifier') {
+            const name =
+              specifier.imported.type === 'Identifier'
+                ? specifier.imported.name
+                : specifier.imported.value
+            imported = exports[name]
+          } else {
+            throw new Error(`Unknown import type: ${(specifier as any).type}`)
+          }
+          declarations[local] = imported
+        }
       }
     }
+    completeTask()
+  } catch (error) {
+    failTask(error)
+    throw error
+  } finally {
+    namespaceResolveOwners.delete(scope)
+    namespaceResolveTasks.delete(scope)
   }
 }

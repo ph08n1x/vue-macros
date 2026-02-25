@@ -4,7 +4,7 @@ import {
   resolveLiteral,
   resolveObjectKey,
 } from '@vue-macros/common'
-import { isTSNamespace } from './namespace'
+import { isTSNamespace, type NamespaceResolveOptions } from './namespace'
 import {
   checkForTSProperties,
   getTSPropertiesKeys,
@@ -176,10 +176,12 @@ export function resolveTypeElements(
 export async function resolveTSIndexedAccessType(
   { scope, type }: TSResolvedType<TSIndexedAccessType>,
   stacks: TSResolvedType<any>[] = [],
+  options: NamespaceResolveOptions = {},
 ): Promise<{ type: TSUnionType; scope: TSScope } | undefined> {
   const object = await resolveTSReferencedType(
     { type: type.objectType, scope },
     stacks,
+    options,
   )
   if (!object || isTSNamespace(object)) return undefined
 
@@ -236,10 +238,14 @@ export async function resolveTSIndexedAccessType(
         String(resolveLiteral(literal)),
       )
     } else if (index.type === 'TSTypeOperator') {
-      const keysStrings = await resolveTSTypeOperator({
-        type: index,
-        scope: object.scope,
-      })
+      const keysStrings = await resolveTSTypeOperator(
+        {
+          type: index,
+          scope: object.scope,
+        },
+        stacks,
+        options,
+      )
       if (!keysStrings) continue
       keys = resolveMaybeTSUnion(keysStrings).map((literal) =>
         String(resolveLiteral(literal)),
@@ -278,6 +284,7 @@ export async function resolveTSIndexedAccessType(
 export async function resolveTSTypeOperator(
   { scope, type }: TSResolvedType<TSTypeOperator>,
   stacks: TSResolvedType<any>[] = [],
+  options: NamespaceResolveOptions = {},
 ): Promise<StringLiteral[] | undefined> {
   if (type.operator !== 'keyof') return undefined
 
@@ -287,6 +294,7 @@ export async function resolveTSTypeOperator(
       scope,
     },
     stacks,
+    options,
   )
   if (!resolved || isTSNamespace(resolved)) return undefined
   const { type: resolvedType, scope: resolvedScope } = resolved

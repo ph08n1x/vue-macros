@@ -10,6 +10,7 @@ import { resolveIdentifier } from '@vue-macros/common'
 import { isTSDeclaration, type TSDeclaration } from './is'
 import {
   isTSNamespace,
+  type NamespaceResolveOptions,
   resolveTSNamespace,
   type TSNamespace,
 } from './namespace'
@@ -43,6 +44,7 @@ export function isSupportedForTSReferencedType(
 export async function resolveTSReferencedType(
   ref: TSResolvedType<TSReferencedType>,
   stacks: TSResolvedType<any>[] = [],
+  options: NamespaceResolveOptions = {},
 ): Promise<TSResolvedType | TSNamespace | undefined> {
   const { scope, type } = ref
   if (stacks.some((stack) => stack.scope === scope && stack.type === type)) {
@@ -56,9 +58,10 @@ export async function resolveTSReferencedType(
       return resolveTSReferencedType(
         { scope, type: type.typeAnnotation },
         stacks,
+        options,
       )
     case 'TSIndexedAccessType':
-      return resolveTSIndexedAccessType({ type, scope }, stacks)
+      return resolveTSIndexedAccessType({ type, scope }, stacks, options)
 
     case 'TSModuleDeclaration': {
       if (type.body.type === 'TSModuleBlock') {
@@ -67,7 +70,7 @@ export async function resolveTSReferencedType(
           ast: type.body,
           scope,
         }
-        await resolveTSNamespace(newScope)
+        await resolveTSNamespace(newScope, options)
         return newScope.exports
       }
       return undefined
@@ -77,7 +80,7 @@ export async function resolveTSReferencedType(
   if (type.type !== 'Identifier' && type.type !== 'TSTypeReference')
     return { scope, type }
 
-  await resolveTSNamespace(scope)
+  await resolveTSNamespace(scope, options)
   const refNames = resolveIdentifier(
     type.type === 'TSTypeReference' ? type.typeName : type,
   )
