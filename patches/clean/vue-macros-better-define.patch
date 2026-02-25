@@ -1,0 +1,233 @@
+diff --git a/packages/better-define/src/index.ts b/packages/better-define/src/index.ts
+index faf9c6eb..1ea2c55b 100644
+--- a/packages/better-define/src/index.ts
++++ b/packages/better-define/src/index.ts
+@@ -46,12 +46,24 @@ const plugin: UnpluginInstance<Options | undefined, false> = createUnplugin(
+     const options = resolveOptions(userOptions, framework)
+     const filter = createFilter(options)
+ 
++    if (process.env.VUE_MACROS_DEBUG) {
++      // eslint-disable-next-line no-console
++      console.warn('[vue-macros][better-define] plugin init', {
++        framework,
++        isProduction: options.isProduction,
++      })
++    }
++
+     return {
+       name,
+       enforce: 'pre',
+ 
+       transformInclude: filter,
+       transform(code, id) {
++        if (process.env.VUE_MACROS_DEBUG) {
++          // eslint-disable-next-line no-console
++          console.warn('[vue-macros][better-define] transform', id)
++        }
+         return transformBetterDefine(code, id, options.isProduction).match(
+           (res) => res,
+           (error) => {
+diff --git a/packages/better-define/tests/__snapshots__/fixtures.test.ts.snap b/packages/better-define/tests/__snapshots__/fixtures.test.ts.snap
+index 317d0672..fa2bf134 100644
+--- a/packages/better-define/tests/__snapshots__/fixtures.test.ts.snap
++++ b/packages/better-define/tests/__snapshots__/fixtures.test.ts.snap
+@@ -1133,6 +1133,140 @@ export { optionalMethod as default };
+ "
+ `;
+ 
++exports[`fixtures > tests/fixtures/pick-omit-alias.vue > isProduction = false 1`] = `
++"// pick-omit-alias.js
++import { defineComponent } from 'vue';
++import _export_sfc from '[NULL]/plugin-vue/export-helper';
++
++var _sfc_main = /* @__PURE__ */ defineComponent({
++	__name: "pick-omit-alias",
++	props: {
++		id: {
++			type: String,
++			required: true
++		},
++		name: {
++			type: String,
++			required: true
++		},
++		mode: {
++			type: String,
++			required: true
++		}
++	},
++	setup(__props, { expose: __expose }) {
++		__expose();
++		const __returned__ = {};
++		Object.defineProperty(__returned__, "__isScriptSetup", {
++			enumerable: false,
++			value: true
++		});
++		return __returned__;
++	}
++});
++
++var pickOmitAlias = /* @__PURE__ */ _export_sfc(_sfc_main, [__FILE__]);
++
++export { pickOmitAlias as default };
++"
++`;
++
++exports[`fixtures > tests/fixtures/pick-omit-alias.vue > isProduction = true 1`] = `
++"// pick-omit-alias.js
++import { defineComponent } from 'vue';
++import _export_sfc from '[NULL]/plugin-vue/export-helper';
++
++var _sfc_main = /* @__PURE__ */ defineComponent({
++	__name: "pick-omit-alias",
++	props: {
++		id: null,
++		name: null,
++		mode: null
++	},
++	setup(__props, { expose: __expose }) {
++		__expose();
++		const __returned__ = {};
++		Object.defineProperty(__returned__, "__isScriptSetup", {
++			enumerable: false,
++			value: true
++		});
++		return __returned__;
++	}
++});
++
++var pickOmitAlias = /* @__PURE__ */ _export_sfc(_sfc_main, [__FILE__]);
++
++export { pickOmitAlias as default };
++"
++`;
++
++exports[`fixtures > tests/fixtures/pick-omit-import.vue > isProduction = false 1`] = `
++"// pick-omit-import.js
++import { defineComponent } from 'vue';
++import _export_sfc from '[NULL]/plugin-vue/export-helper';
++
++var _sfc_main = /* @__PURE__ */ defineComponent({
++	__name: "pick-omit-import",
++	props: {
++		id: {
++			type: String,
++			required: true
++		},
++		name: {
++			type: String,
++			required: true
++		},
++		mode: {
++			type: String,
++			required: true
++		}
++	},
++	setup(__props, { expose: __expose }) {
++		__expose();
++		const __returned__ = {};
++		Object.defineProperty(__returned__, "__isScriptSetup", {
++			enumerable: false,
++			value: true
++		});
++		return __returned__;
++	}
++});
++
++var pickOmitImport = /* @__PURE__ */ _export_sfc(_sfc_main, [__FILE__]);
++
++export { pickOmitImport as default };
++"
++`;
++
++exports[`fixtures > tests/fixtures/pick-omit-import.vue > isProduction = true 1`] = `
++"// pick-omit-import.js
++import { defineComponent } from 'vue';
++import _export_sfc from '[NULL]/plugin-vue/export-helper';
++
++var _sfc_main = /* @__PURE__ */ defineComponent({
++	__name: "pick-omit-import",
++	props: {
++		id: null,
++		name: null,
++		mode: null
++	},
++	setup(__props, { expose: __expose }) {
++		__expose();
++		const __returned__ = {};
++		Object.defineProperty(__returned__, "__isScriptSetup", {
++			enumerable: false,
++			value: true
++		});
++		return __returned__;
++	}
++});
++
++var pickOmitImport = /* @__PURE__ */ _export_sfc(_sfc_main, [__FILE__]);
++
++export { pickOmitImport as default };
++"
++`;
++
+ exports[`fixtures > tests/fixtures/playground.vue > isProduction = false 1`] = `
+ "// playground.js
+ import { defineComponent } from 'vue';
+diff --git a/packages/better-define/tests/fixtures/pick-omit-alias.vue b/packages/better-define/tests/fixtures/pick-omit-alias.vue
+new file mode 100644
+index 00000000..161de4f5
+--- /dev/null
++++ b/packages/better-define/tests/fixtures/pick-omit-alias.vue
+@@ -0,0 +1,6 @@
++<script setup lang="ts">
++import type { UtilityBase, UtilityExtra } from '@/types'
++
++type Props = Pick<UtilityBase, 'id' | 'name'> & Omit<UtilityExtra, 'count'>
++defineProps<Props>()
++</script>
+diff --git a/packages/better-define/tests/fixtures/pick-omit-import.vue b/packages/better-define/tests/fixtures/pick-omit-import.vue
+new file mode 100644
+index 00000000..fabed7a7
+--- /dev/null
++++ b/packages/better-define/tests/fixtures/pick-omit-import.vue
+@@ -0,0 +1,8 @@
++<script setup lang="ts">
++import type { UtilityBase, UtilityExtra } from './types'
++
++type Picked = Pick<UtilityBase, 'id' | 'name'>
++type Omitted = Omit<UtilityExtra, 'count'>
++
++defineProps<Picked & Omitted>()
++</script>
+diff --git a/packages/better-define/tests/fixtures/tsconfig.json b/packages/better-define/tests/fixtures/tsconfig.json
+new file mode 100644
+index 00000000..9c333833
+--- /dev/null
++++ b/packages/better-define/tests/fixtures/tsconfig.json
+@@ -0,0 +1,8 @@
++{
++  "compilerOptions": {
++    "baseUrl": ".",
++    "paths": {
++      "@/*": ["./*"]
++    }
++  }
++}
+diff --git a/packages/better-define/tests/fixtures/types.ts b/packages/better-define/tests/fixtures/types.ts
+index 32cd8bcc..f2893e37 100644
+--- a/packages/better-define/tests/fixtures/types.ts
++++ b/packages/better-define/tests/fixtures/types.ts
+@@ -3,3 +3,14 @@ export type Num = number
+ export interface CommonProps {
+   base: string
+ }
++
++export interface UtilityBase {
++  id: string
++  name: string
++  internalOnly: boolean
++}
++
++export interface UtilityExtra {
++  mode: 'light' | 'dark'
++  count?: number
++}

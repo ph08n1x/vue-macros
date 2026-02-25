@@ -1,0 +1,901 @@
+diff --git a/packages/api/src/index.ts b/packages/api/src/index.ts
+index 2ddcc1a3..ecef55c7 100644
+--- a/packages/api/src/index.ts
++++ b/packages/api/src/index.ts
+@@ -1,3 +1,12 @@
++import process from 'node:process'
++
++if (process.env.VUE_MACROS_DEBUG) {
++  // eslint-disable-next-line no-console
++  console.warn('--- vue-macros debug build ---')
++  // eslint-disable-next-line no-console
++  console.warn('[vue-macros][api] loaded')
++}
++
+ export * from '@vue-macros/common'
+ 
+ export * from './error'
+diff --git a/packages/api/src/ts/namespace.ts b/packages/api/src/ts/namespace.ts
+index 610972d8..62807ae8 100644
+--- a/packages/api/src/ts/namespace.ts
++++ b/packages/api/src/ts/namespace.ts
+@@ -14,6 +14,11 @@ export type TSNamespace = {
+   [K in string]: TSResolvedType | TSNamespace | undefined
+ } & { [namespaceSymbol]: true }
+ 
++const namespaceResolveTasks = new WeakMap<
++  TSScope,
++  { token: symbol; task: Promise<void> }
++>()
++
+ export function isTSNamespace(val: unknown): val is TSNamespace {
+   return !!val && typeof val === 'object' && namespaceSymbol in val
+ }
+@@ -25,163 +30,179 @@ export function isTSNamespace(val: unknown): val is TSNamespace {
+  */
+ export function resolveTSNamespace(
+   scope: TSScope,
++  namespaceToken: symbol = Symbol('namespace-resolve'),
+ ): ResultAsync<void, TransformError<ErrorUnknownNode>> {
+   return safeTry(async function* () {
++    const inFlight = namespaceResolveTasks.get(scope)
++    if (inFlight) {
++      // Re-entrant resolution from the same chain should not wait on itself.
++      if (inFlight.token === namespaceToken) return ok()
++      await inFlight.task
++      return ok()
++    }
+     if (scope.exports) return ok()
+ 
+-    const exports: TSNamespace = {
+-      [namespaceSymbol]: true,
+-    }
+-    scope.exports = exports
++    let completeTask!: () => void
++    const task = new Promise<void>((resolve) => {
++      completeTask = resolve
++    })
++    namespaceResolveTasks.set(scope, { token: namespaceToken, task })
+ 
+-    const declarations: TSNamespace = {
+-      [namespaceSymbol]: true,
+-      ...scope.declarations,
+-    }
+-    scope.declarations = declarations
+-
+-    const { body, file } = resolveTSScope(scope)
+-    for (const stmt of body || []) {
+-      if (
+-        stmt.type === 'ExportDefaultDeclaration' &&
+-        isTSDeclaration(stmt.declaration)
+-      ) {
+-        exports.default = yield* resolveTSReferencedType({
+-          scope,
+-          type: stmt.declaration,
+-        })
+-      } else if (stmt.type === 'ExportAllDeclaration') {
+-        const resolved = await resolveDts(stmt.source.value, file.filePath)
+-        if (!resolved) continue
+-
+-        const sourceScope = await getTSFile(resolved)
+-        yield* resolveTSNamespace(sourceScope)
+-
+-        Object.assign(exports, sourceScope.exports!)
+-      } else if (stmt.type === 'ExportNamedDeclaration') {
+-        let sourceExports: TSNamespace
+-
+-        if (stmt.source) {
++    try {
++      const exports: TSNamespace = {
++        [namespaceSymbol]: true,
++      }
++      scope.exports = exports
++
++      const declarations: TSNamespace = {
++        [namespaceSymbol]: true,
++        ...scope.declarations,
++      }
++      scope.declarations = declarations
++
++      const { body, file } = resolveTSScope(scope)
++      for (const stmt of body || []) {
++        if (
++          stmt.type === 'ExportDefaultDeclaration' &&
++          isTSDeclaration(stmt.declaration)
++        ) {
++          exports.default = yield* resolveTSReferencedType({
++            scope,
++            type: stmt.declaration,
++          }, [], namespaceToken)
++        } else if (stmt.type === 'ExportAllDeclaration') {
+           const resolved = await resolveDts(stmt.source.value, file.filePath)
+           if (!resolved) continue
+ 
+-          const scope = await getTSFile(resolved)
+-          yield* resolveTSNamespace(scope)
+-          sourceExports = scope.exports!
+-        } else {
+-          sourceExports = declarations
+-        }
+-
+-        for (const specifier of stmt.specifiers) {
+-          let exported: TSNamespace[string]
+-          switch (specifier.type) {
+-            case 'ExportDefaultSpecifier': {
+-              // export x from 'xxx'
+-              exported = sourceExports.default
++          const sourceScope = await getTSFile(resolved)
++          yield* resolveTSNamespace(sourceScope, namespaceToken)
+ 
+-              break
+-            }
+-            case 'ExportNamespaceSpecifier': {
+-              // export * as x from 'xxx'
+-              exported = sourceExports
++          Object.assign(exports, sourceScope.exports!)
++        } else if (stmt.type === 'ExportNamedDeclaration') {
++          let sourceExports: TSNamespace
+ 
+-              break
+-            }
+-            case 'ExportSpecifier': {
+-              // export { x } from 'xxx'
+-              exported = sourceExports![specifier.local.name]
++          if (stmt.source) {
++            const resolved = await resolveDts(stmt.source.value, file.filePath)
++            if (!resolved) continue
+ 
+-              break
+-            }
+-            default: {
+-              return err(
+-                new TransformError(
+-                  `Unknown export type: ${
+-                    // @ts-expect-error unknown type
+-                    specifier.type as string
+-                  }`,
+-                ),
+-              )
+-            }
++            const scope = await getTSFile(resolved)
++            yield* resolveTSNamespace(scope, namespaceToken)
++            sourceExports = scope.exports!
++          } else {
++            sourceExports = declarations
+           }
+ 
+-          const name =
+-            specifier.exported.type === 'Identifier'
+-              ? specifier.exported.name
+-              : specifier.exported.value
+-          exports[name] = exported
+-        }
++          for (const specifier of stmt.specifiers) {
++            let exported: TSNamespace[string]
++            switch (specifier.type) {
++              case 'ExportDefaultSpecifier': {
++                // export x from 'xxx'
++                exported = sourceExports.default
++
++                break
++              }
++              case 'ExportNamespaceSpecifier': {
++                // export * as x from 'xxx'
++                exported = sourceExports
++
++                break
++              }
++              case 'ExportSpecifier': {
++                // export { x } from 'xxx'
++                exported = sourceExports![specifier.local.name]
++
++                break
++              }
++              default: {
++                return err(
++                  new TransformError(
++                    `Unknown export type: ${
++                      // @ts-expect-error unknown type
++                      specifier.type as string
++                    }`,
++                  ),
++                )
++              }
++            }
+ 
+-        // export interface A {}
+-        if (isTSDeclaration(stmt.declaration)) {
+-          const decl = stmt.declaration
+-
+-          if (decl.id?.type === 'Identifier') {
+-            const exportedName = decl.id.name
+-            declarations[exportedName] = exports[exportedName] =
+-              yield* resolveTSReferencedType({
+-                scope,
+-                type: decl,
+-              })
++            const name =
++              specifier.exported.type === 'Identifier'
++                ? specifier.exported.name
++                : specifier.exported.value
++            exports[name] = exported
+           }
+-        }
+-      }
+-
+-      // declarations
+-      else if (isTSDeclaration(stmt)) {
+-        if (stmt.id?.type !== 'Identifier') continue
+-
+-        declarations[stmt.id.name] = yield* resolveTSReferencedType({
+-          scope,
+-          type: stmt,
+-        })
+-      } else if (stmt.type === 'ImportDeclaration') {
+-        const resolved = await resolveDts(stmt.source.value, file.filePath)
+-        if (!resolved) continue
+-
+-        const importScope = await getTSFile(resolved)
+-        yield* resolveTSNamespace(importScope)
+-        const exports = importScope.exports!
+-
+-        for (const specifier of stmt.specifiers) {
+-          const local = specifier.local.name
+ 
+-          let imported: TSNamespace[string]
+-          switch (specifier.type) {
+-            case 'ImportDefaultSpecifier': {
+-              imported = exports.default
+-
+-              break
++          // export interface A {}
++          if (isTSDeclaration(stmt.declaration)) {
++            const decl = stmt.declaration
++
++            if (decl.id?.type === 'Identifier') {
++              const exportedName = decl.id.name
++              declarations[exportedName] = exports[exportedName] =
++                yield* resolveTSReferencedType({
++                  scope,
++                  type: decl,
++                }, [], namespaceToken)
+             }
+-            case 'ImportNamespaceSpecifier': {
+-              imported = exports
++          }
++        } else if (isTSDeclaration(stmt)) {
++          if (stmt.id?.type !== 'Identifier') continue
++
++          declarations[stmt.id.name] = yield* resolveTSReferencedType({
++            scope,
++            type: stmt,
++          }, [], namespaceToken)
++        } else if (stmt.type === 'ImportDeclaration') {
++          const resolved = await resolveDts(stmt.source.value, file.filePath)
++          if (!resolved) continue
+ 
+-              break
+-            }
+-            case 'ImportSpecifier': {
+-              const name =
+-                specifier.imported.type === 'Identifier'
+-                  ? specifier.imported.name
+-                  : specifier.imported.value
+-              imported = exports[name]
+-
+-              break
+-            }
+-            default: {
+-              return err(
+-                new TransformError(
+-                  `Unknown import type: ${
+-                    // @ts-expect-error unknown type
+-                    specifier.type as string
+-                  }`,
+-                ),
+-              )
++          const importScope = await getTSFile(resolved)
++          yield* resolveTSNamespace(importScope, namespaceToken)
++          const exports = importScope.exports!
++
++          for (const specifier of stmt.specifiers) {
++            const local = specifier.local.name
++
++            let imported: TSNamespace[string]
++            switch (specifier.type) {
++              case 'ImportDefaultSpecifier': {
++                imported = exports.default
++
++                break
++              }
++              case 'ImportNamespaceSpecifier': {
++                imported = exports
++
++                break
++              }
++              case 'ImportSpecifier': {
++                const name =
++                  specifier.imported.type === 'Identifier'
++                    ? specifier.imported.name
++                    : specifier.imported.value
++                imported = exports[name]
++
++                break
++              }
++              default: {
++                return err(
++                  new TransformError(
++                    `Unknown import type: ${
++                      // @ts-expect-error unknown type
++                      specifier.type as string
++                    }`,
++                  ),
++                )
++              }
+             }
++            declarations[local] = imported
+           }
+-          declarations[local] = imported
+         }
+       }
++      return ok()
++    } finally {
++      completeTask()
++      namespaceResolveTasks.delete(scope)
+     }
+-    return ok()
+   })
+ }
+diff --git a/packages/api/src/ts/resolve-file.ts b/packages/api/src/ts/resolve-file.ts
+index 854fb84b..2ac3c042 100644
+--- a/packages/api/src/ts/resolve-file.ts
++++ b/packages/api/src/ts/resolve-file.ts
+@@ -1,9 +1,11 @@
++import fs from 'node:fs'
+ import path from 'node:path'
+ import { tsFileCache } from './scope'
+ import type { ResolverFactory } from 'oxc-resolver'
+ import type { ModuleNode, Plugin } from 'vite'
+ 
+-let typesResolver: ResolverFactory
++let fallbackResolver: ResolverFactory
++const resolverByTsconfig = new Map<string, ResolverFactory>()
+ 
+ const referencedFiles = new Map<string /* file */, Set<string /* importer */>>()
+ 
+@@ -28,16 +30,8 @@ export async function resolveDts(
+   const cached = resolveCache.get(importer)?.get(id)
+   if (cached) return cached
+ 
+-  if (!typesResolver) {
+-    const { ResolverFactory } = await import('oxc-resolver')
+-    typesResolver = new ResolverFactory({
+-      mainFields: ['types'],
+-      conditionNames: ['types', 'import'],
+-      extensions: ['.d.ts', '.ts'],
+-    })
+-  }
+-
+-  const { error, path: resolved } = await typesResolver.async(
++  const resolver = await getResolver(importer)
++  const { error, path: resolved } = await resolver.async(
+     path.dirname(importer),
+     id,
+   )
+@@ -52,6 +46,49 @@ export async function resolveDts(
+   return resolved
+ }
+ 
++async function getResolver(importer: string): Promise<ResolverFactory> {
++  const { ResolverFactory } = await import('oxc-resolver')
++  const tsconfigFile = findNearestTsconfig(path.dirname(importer))
++
++  if (!tsconfigFile) {
++    if (!fallbackResolver) {
++      fallbackResolver = new ResolverFactory({
++        mainFields: ['types'],
++        conditionNames: ['types', 'import'],
++        extensions: ['.d.ts', '.ts'],
++      })
++    }
++    return fallbackResolver
++  }
++
++  const cached = resolverByTsconfig.get(tsconfigFile)
++  if (cached) return cached
++
++  const resolver = new ResolverFactory({
++    mainFields: ['types'],
++    conditionNames: ['types', 'import'],
++    extensions: ['.d.ts', '.ts'],
++    tsconfig: {
++      configFile: tsconfigFile,
++      references: 'auto',
++    },
++  })
++  resolverByTsconfig.set(tsconfigFile, resolver)
++  return resolver
++}
++
++function findNearestTsconfig(fromDir: string): string | undefined {
++  let current = fromDir
++  while (true) {
++    const tsconfig = path.join(current, 'tsconfig.json')
++    if (fs.existsSync(tsconfig)) return tsconfig
++
++    const parent = path.dirname(current)
++    if (parent === current) return
++    current = parent
++  }
++}
++
+ export const resolveDtsHMR: NonNullable<Plugin['handleHotUpdate']> = ({
+   file,
+   server,
+diff --git a/packages/api/src/ts/resolve-reference.ts b/packages/api/src/ts/resolve-reference.ts
+index 6632025e..4b0cd11d 100644
+--- a/packages/api/src/ts/resolve-reference.ts
++++ b/packages/api/src/ts/resolve-reference.ts
+@@ -48,12 +48,22 @@ export function isSupportedForTSReferencedType(
+ export function resolveTSReferencedType(
+   ref: TSResolvedType<TSReferencedType>,
+   stacks: TSResolvedType<any>[] = [],
++  namespaceToken?: symbol,
+ ): ResultAsync<
+   TSResolvedType | TSNamespace | undefined,
+   TransformError<ErrorUnknownNode>
+ > {
+   return safeTry(async function* () {
+     const { scope, type } = ref
++    if (process.env.VUE_MACROS_DEBUG) {
++      // eslint-disable-next-line no-console
++      console.warn('[vue-macros][resolve-ref] enter', {
++        scopeKind: scope.kind,
++        type: type.type,
++        // eslint-disable-next-line @typescript-eslint/no-explicit-any
++        name: (type as any).id?.name,
++      })
++    }
+     if (stacks.some((stack) => stack.scope === scope && stack.type === type)) {
+       return ok(ref as any)
+     }
+@@ -65,9 +75,10 @@ export function resolveTSReferencedType(
+         return resolveTSReferencedType(
+           { scope, type: type.typeAnnotation },
+           stacks,
++          namespaceToken,
+         )
+       case 'TSIndexedAccessType':
+-        return resolveTSIndexedAccessType({ type, scope }, stacks)
++        return resolveTSIndexedAccessType({ type, scope }, stacks, namespaceToken)
+ 
+       case 'TSModuleDeclaration': {
+         if (type.body.type === 'TSModuleBlock') {
+@@ -76,7 +87,7 @@ export function resolveTSReferencedType(
+             ast: type.body,
+             scope,
+           }
+-          yield* resolveTSNamespace(newScope)
++          yield* resolveTSNamespace(newScope, namespaceToken)
+           return ok(newScope.exports)
+         }
+         return ok()
+@@ -86,10 +97,16 @@ export function resolveTSReferencedType(
+     if (type.type !== 'Identifier' && type.type !== 'TSTypeReference')
+       return ok({ scope, type })
+ 
+-    yield* resolveTSNamespace(scope)
++    yield* resolveTSNamespace(scope, namespaceToken)
+     const refNames = resolveIdentifier(
+       type.type === 'TSTypeReference' ? type.typeName : type,
+     )
++    if (process.env.VUE_MACROS_DEBUG) {
++      // eslint-disable-next-line no-console
++      console.warn('[vue-macros][resolve-ref] resolveIdentifier', {
++        refNames,
++      })
++    }
+ 
+     let resolved: TSResolvedType | TSNamespace | undefined =
+       resolveTSScope(scope).declarations!
+@@ -98,10 +115,24 @@ export function resolveTSReferencedType(
+       if (isTSNamespace(resolved) && resolved[name]) {
+         resolved = resolved[name]
+       } else if (type.type === 'TSTypeReference') {
++        if (process.env.VUE_MACROS_DEBUG) {
++          // eslint-disable-next-line no-console
++          console.warn('[vue-macros][resolve-ref] unresolved', {
++            name,
++            refNames,
++          })
++        }
+         return ok({ type, scope })
+       }
+     }
+ 
++    if (process.env.VUE_MACROS_DEBUG) {
++      // eslint-disable-next-line no-console
++      console.warn('[vue-macros][resolve-ref] resolved', {
++        refNames,
++        resolvedKind: isTSNamespace(resolved) ? 'namespace' : 'type',
++      })
++    }
+     return ok(resolved)
+   })
+ }
+diff --git a/packages/api/src/ts/resolve.ts b/packages/api/src/ts/resolve.ts
+index 3baa4a07..eebd5dcc 100644
+--- a/packages/api/src/ts/resolve.ts
++++ b/packages/api/src/ts/resolve.ts
+@@ -183,6 +183,7 @@ export function resolveTypeElements(
+ export function resolveTSIndexedAccessType(
+   { scope, type }: TSResolvedType<TSIndexedAccessType>,
+   stacks: TSResolvedType<any>[] = [],
++  namespaceToken?: symbol,
+ ): ResultAsync<
+   { type: TSUnionType; scope: TSScope } | void,
+   TransformError<ErrorUnknownNode>
+@@ -191,6 +192,7 @@ export function resolveTSIndexedAccessType(
+     const object = yield* resolveTSReferencedType(
+       { type: type.objectType, scope },
+       stacks,
++      namespaceToken,
+     )
+     if (!object || isTSNamespace(object)) return ok()
+ 
+@@ -247,10 +249,14 @@ export function resolveTSIndexedAccessType(
+           String(resolveLiteral(literal)),
+         )
+       } else if (index.type === 'TSTypeOperator') {
+-        const keysStrings = yield* resolveTSTypeOperator({
+-          type: index,
+-          scope: object.scope,
+-        })
++        const keysStrings = yield* resolveTSTypeOperator(
++          {
++            type: index,
++            scope: object.scope,
++          },
++          stacks,
++          namespaceToken,
++        )
+         if (!keysStrings) continue
+         keys = resolveMaybeTSUnion(keysStrings).map((literal) =>
+           String(resolveLiteral(literal)),
+@@ -290,6 +296,7 @@ export function resolveTSIndexedAccessType(
+ export function resolveTSTypeOperator(
+   { scope, type }: TSResolvedType<TSTypeOperator>,
+   stacks: TSResolvedType<any>[] = [],
++  namespaceToken?: symbol,
+ ): ResultAsync<StringLiteral[] | void, TransformError<ErrorUnknownNode>> {
+   return safeTry(async function* () {
+     if (type.operator !== 'keyof') return ok()
+@@ -300,6 +307,7 @@ export function resolveTSTypeOperator(
+         scope,
+       },
+       stacks,
++      namespaceToken,
+     )
+     if (!resolved || isTSNamespace(resolved)) return ok()
+     const { type: resolvedType, scope: resolvedScope } = resolved
+diff --git a/packages/api/src/vue/props.ts b/packages/api/src/vue/props.ts
+index 88735197..688f1980 100644
+--- a/packages/api/src/vue/props.ts
++++ b/packages/api/src/vue/props.ts
+@@ -2,6 +2,7 @@ import {
+   babelParse,
+   isStaticObjectKey,
+   isTypeOf,
++  resolveLiteral,
+   resolveIdentifier,
+   resolveObjectExpression,
+   resolveString,
+@@ -12,8 +13,11 @@ import {
+ import { err, ok, safeTry, type ResultAsync } from 'neverthrow'
+ import {
+   isTSNamespace,
++  resolveMaybeTSUnion,
++  resolveTSLiteralType,
+   resolveTSProperties,
+   resolveTSReferencedType,
++  resolveTSTypeOperator,
+   resolveTSScope,
+   type TSFile,
+   type TSNamespace,
+@@ -53,10 +57,41 @@ type BuiltInTypesHandler = Record<
+     handleTSProperties?: (properties: TSProperties) => TSProperties
+   }
+ >
++function getTypeRefParams(resolved: TSTypeReference): TSType[] | undefined {
++  // @babel/parser has had multiple shapes over time:
++  // - typeParameters: { params: TSType[] }
++  // - typeArguments: { params: TSType[] }
++  // - typeParameters/typeArguments: TSType[]
++  const typeParameters = resolved.typeParameters
++  if (Array.isArray(typeParameters)) return typeParameters as TSType[]
++  if (typeParameters?.params) return typeParameters.params
++
++  // eslint-disable-next-line @typescript-eslint/no-explicit-any
++  const typeArguments = (resolved as any).typeArguments
++  if (Array.isArray(typeArguments)) return typeArguments as TSType[]
++  // eslint-disable-next-line @typescript-eslint/no-explicit-any
++  if (typeArguments?.params) return typeArguments.params
++
++  return undefined
++}
++
++function getUnresolvedTypeRefName(
++  scope: TSScope,
++  type: TSType,
++): string | undefined {
++  if (type.type !== 'TSTypeReference') return
++  const names = resolveIdentifier(type.typeName)
++  const root = names[0]
++  const declarations = resolveTSScope(scope).declarations
++  if (!declarations || !root || !(root in declarations)) {
++    return names.join('.')
++  }
++  return
++}
+ const builtInTypesHandlers: BuiltInTypesHandler = {
+   Partial: {
+     handleType(resolved) {
+-      return resolved.typeParameters?.params[0]
++      return getTypeRefParams(resolved)?.[0]
+     },
+     handleTSProperties(properties) {
+       for (const prop of Object.values(properties.properties)) {
+@@ -67,7 +102,7 @@ const builtInTypesHandlers: BuiltInTypesHandler = {
+   },
+   Required: {
+     handleType(resolved) {
+-      return resolved.typeParameters?.params[0]
++      return getTypeRefParams(resolved)?.[0]
+     },
+     handleTSProperties(properties) {
+       for (const prop of Object.values(properties.properties)) {
+@@ -78,10 +113,9 @@ const builtInTypesHandlers: BuiltInTypesHandler = {
+   },
+   Readonly: {
+     handleType(resolved) {
+-      return resolved.typeParameters?.params[0]
++      return getTypeRefParams(resolved)?.[0]
+     },
+   },
+-  // TODO: pick, omit
+ }
+ 
+ export function handleTSPropsDefinition({
+@@ -475,6 +509,12 @@ export function handleTSPropsDefinition({
+     TransformError<ErrorResolveTS | ErrorUnknownNode>
+   > {
+     return safeTry(async function* () {
++      if (process.env.VUE_MACROS_DEBUG) {
++        // eslint-disable-next-line no-console
++        console.warn('[vue-macros][resolve-defs] start', {
++          type: typeDeclRaw.type.type,
++        })
++      }
+       let resolved:
+         | TSResolvedType
+         | TSResolvedType<TSType>
+@@ -483,6 +523,12 @@ export function handleTSPropsDefinition({
+         (yield* resolveTSReferencedType(typeDeclRaw)) || typeDeclRaw
+ 
+       let builtInTypesHandler: BuiltInTypesHandler[string] | undefined
++      let pickOmitKeys:
++        | {
++            typeName: 'Pick' | 'Omit'
++            keys: Set<string>
++          }
++        | undefined
+ 
+       if (
+         resolved &&
+@@ -496,6 +542,24 @@ export function handleTSPropsDefinition({
+         if (typeName in builtInTypesHandlers) {
+           builtInTypesHandler = builtInTypesHandlers[typeName]
+           type = builtInTypesHandler.handleType(resolved.type)
++        } else if (typeName === 'Pick' || typeName === 'Omit') {
++          if (process.env.VUE_MACROS_DEBUG) {
++            const params = getTypeRefParams(resolved.type)
++            // eslint-disable-next-line no-console
++            console.warn('[vue-macros][pick-omit] resolveDefinitions', {
++              typeName,
++              paramsIsArray: Array.isArray(params),
++              paramsLength: params?.length,
++              typeParameters: resolved.type.typeParameters,
++              // eslint-disable-next-line @typescript-eslint/no-explicit-any
++              typeArguments: (resolved.type as any).typeArguments,
++            })
++          }
++          type = getTypeRefParams(resolved.type)?.[0]
++          pickOmitKeys = {
++            typeName,
++            keys: yield* resolvePickOmitKeys(typeName, resolved),
++          }
+         }
+ 
+         if (type)
+@@ -506,10 +570,33 @@ export function handleTSPropsDefinition({
+       }
+ 
+       if (!resolved || isTSNamespace(resolved)) {
++        const unresolved = getUnresolvedTypeRefName(
++          typeDeclRaw.scope,
++          typeDeclRaw.type,
++        )
++        if (process.env.VUE_MACROS_DEBUG) {
++          // eslint-disable-next-line no-console
++          console.warn('[vue-macros][resolve-defs] unresolved', {
++            unresolved,
++          })
++        }
++        if (unresolved) {
++          return err(
++            new TransformError(
++              `Cannot resolve TS type: ${unresolved} (unresolved reference; check imports/tsconfig paths)`,
++            ),
++          )
++        }
+         return err(new TransformError('Cannot resolve TS definition.'))
+       }
+ 
+       const { type: definitionsAst, scope } = resolved
++      if (process.env.VUE_MACROS_DEBUG) {
++        // eslint-disable-next-line no-console
++        console.warn('[vue-macros][resolve-defs] resolvedAst', {
++          type: definitionsAst.type,
++        })
++      }
+       if (definitionsAst.type === 'TSIntersectionType') {
+         return resolveIntersection(definitionsAst, scope)
+       } else if (definitionsAst.type === 'TSUnionType') {
+@@ -519,19 +606,19 @@ export function handleTSPropsDefinition({
+         definitionsAst.type !== 'TSTypeLiteral' &&
+         definitionsAst.type !== 'TSMappedType'
+       ) {
+-        return definitionsAst.type === 'TSTypeReference'
+-          ? err(
+-              new TransformError(
+-                `Cannot resolve TS type: ${resolveIdentifier(
+-                  definitionsAst.typeName,
+-                ).join('.')}`,
+-              ),
+-            )
+-          : err(
+-              new TransformError(
+-                `Cannot resolve TS definition: ${definitionsAst.type}`,
+-              ),
+-            )
++        if (definitionsAst.type === 'TSTypeReference') {
++          const typeName = resolveIdentifier(definitionsAst.typeName).join('.')
++          const unresolved = getUnresolvedTypeRefName(scope, definitionsAst)
++          const hint = unresolved
++            ? ' (unresolved reference; check imports/tsconfig paths)'
++            : ' (unsupported type reference)'
++          return err(new TransformError(`Cannot resolve TS type: ${typeName}${hint}`))
++        }
++        return err(
++          new TransformError(
++            `Cannot resolve TS definition: ${definitionsAst.type} (unsupported node)`,
++          ),
++        )
+       }
+ 
+       let properties = yield* resolveTSProperties({
+@@ -541,6 +628,8 @@ export function handleTSPropsDefinition({
+ 
+       if (builtInTypesHandler?.handleTSProperties)
+         properties = builtInTypesHandler.handleTSProperties(properties)
++      if (pickOmitKeys)
++        properties = filterPickOmitProperties(properties, pickOmitKeys)
+ 
+       return ok({
+         definitions: yield* resolveNormal(properties),
+@@ -564,6 +653,105 @@ export function handleTSPropsDefinition({
+ 
+     return { defaults, defaultsAst }
+   }
++
++  function resolvePickOmitKeys(
++    typeName: 'Pick' | 'Omit',
++    resolved: TSResolvedType<TSTypeReference>,
++  ): ResultAsync<Set<string>, TransformError<ErrorResolveTS | ErrorUnknownNode>> {
++    return safeTry(async function* () {
++      const params = getTypeRefParams(resolved.type)
++      const keysType = params?.[1]
++      if (process.env.VUE_MACROS_DEBUG || process.env.VUE_MACROS_DEBUG_PICK_OMIT) {
++        // eslint-disable-next-line no-console
++        console.warn('[vue-macros][pick-omit]', {
++          typeName,
++          typeParameters: resolved.type.typeParameters,
++          // eslint-disable-next-line @typescript-eslint/no-explicit-any
++          typeArguments: (resolved.type as any).typeArguments,
++          paramsIsArray: Array.isArray(params),
++          paramsLength: params?.length,
++          keysType: keysType?.type,
++        })
++      }
++      if (!keysType) {
++        return err(
++          new TransformError(
++            `Cannot resolve TS type: ${typeName} (missing type parameters)`,
++          ),
++        )
++      }
++
++      const keyResolved =
++        (yield* resolveTSReferencedType({
++          type: keysType,
++          scope: resolved.scope,
++        })) || { type: keysType, scope: resolved.scope }
++
++      const keys = new Set<string>()
++      for (const subType of resolveMaybeTSUnion(keyResolved.type)) {
++        if (subType.type === 'TSLiteralType') {
++          const literal = yield* resolveTSLiteralType({
++            type: subType,
++            scope: keyResolved.scope,
++          })
++          if (!literal) continue
++
++          for (const l of resolveMaybeTSUnion(literal))
++            keys.add(String(resolveLiteral(l)))
++        } else if (subType.type === 'TSTypeOperator') {
++          const keyLiterals = yield* resolveTSTypeOperator({
++            type: subType,
++            scope: keyResolved.scope,
++          })
++          if (!keyLiterals) continue
++
++          for (const l of keyLiterals)
++            keys.add(String(resolveLiteral(l)))
++        }
++      }
++
++      if (keys.size === 0) {
++        return err(
++          new TransformError(
++            `Cannot resolve TS type: ${typeName} (unsupported key type)`,
++          ),
++        )
++      }
++
++      return ok(keys)
++    })
++  }
++
++  function filterPickOmitProperties(
++    properties: TSProperties,
++    pickOmit: {
++      typeName: 'Pick' | 'Omit'
++      keys: Set<string>
++    },
++  ): TSProperties {
++    const shouldKeep = (key: string) =>
++      pickOmit.typeName === 'Pick'
++        ? pickOmit.keys.has(key)
++        : !pickOmit.keys.has(key)
++
++    const filteredMethods: TSProperties['methods'] = Object.create(null)
++    for (const [key, value] of Object.entries(properties.methods)) {
++      if (shouldKeep(String(key)))
++        filteredMethods[key] = value
++    }
++
++    const filteredProperties: TSProperties['properties'] = Object.create(null)
++    for (const [key, value] of Object.entries(properties.properties)) {
++      if (shouldKeep(String(key)))
++        filteredProperties[key] = value
++    }
++
++    return {
++      ...properties,
++      methods: filteredMethods,
++      properties: filteredProperties,
++    }
++  }
+ }
+ 
+ function buildNewProp(
