@@ -105,3 +105,88 @@ This document summarizes the issues we encountered in `defineProps` type transfo
 - Early/incomplete resolution during cyclic contention is mitigated by deferred and final retry passes.
 - Concurrency pressure is reduced through singleflight in key hot paths.
 - CI and shard-level diagnosis is substantially improved through richer wait diagnostics.
+
+## Detailed Log Walkthrough (Deadlock Case)
+
+This section maps the observed locked-run logs to exact runtime behavior.
+
+### Pre-fix Deadlock Sequence
+
+1. Token `88` starts resolving Vue index types
+- Log shape:
+  - `resolve:start scope .../vue/types/index.d.ts tokenId: 88`
+- Meaning:
+  - `resolveTSNamespace()` creates an in-flight task and marks token `88` as owner for that scope.
+
+2. Token `88` traverses import into `vue.d.ts`
+- Log shape:
+  - `resolve:import-hit ... source './vue' -> importScope .../vue/types/vue.d.ts`
+  - `resolve:start scope .../vue/types/vue.d.ts tokenId: 88`
+- Meaning:
+  - token `88` now owns `vue.d.ts` resolution as part of index traversal.
+
+3. Token `42` starts resolving `options.d.ts`
+- Log shape:
+  - `resolve:start scope .../vue/types/options.d.ts tokenId: 42`
+- Meaning:
+  - independent in-flight owner (`42`) for the options scope.
+
+4. Token `42` tries to enter `vue.d.ts` (owned by `88`)
+- Log shape:
+  - `resolve:wait-start scope .../vue/types/vue.d.ts ownerTokenId: 88 requestTokenId: 42`
+- Meaning:
+  - token `42` is now waiting on token `88`.
+
+5. Token `88` later tries to enter `options.d.ts` (owned by `42`)
+- Log shape:
+  - `resolve:wait-start scope .../vue/types/options.d.ts ownerTokenId: 42 requestTokenId: 88`
+- Meaning:
+  - token `88` is now waiting on token `42`.
+
+Result:
+- Circular wait: `42 -> 88` and `88 -> 42`
+- Stuck state:
+  - repeated `wait-start`
+  - no `wait-end`
+  - no final `resolve:done` for blocked scopes
+
+### Post-fix Behavior on Same Pattern
+
+1. First wait edge is recorded
+- Example:
+  - `42` waiting on `88` adds graph edge `42 -> 88`.
+
+2. Second wait attempt checks for cycle
+- Example:
+  - `88` trying to wait on `42` asks if this creates cycle.
+  - Since `42 -> 88` exists, `88 -> 42` would close a cycle.
+
+3. Cyclic wait is skipped instead of blocked
+- Log shape:
+  - `resolve:wait-cycle-skip`
+- Meaning:
+  - deadlock is prevented by avoiding the second blocking wait.
+
+4. Deferred retry is scheduled
+- Log shape:
+  - `resolve:wait-cycle-retry-scheduled`
+  - later `resolve:wait-cycle-retry-done` (or `...-failed`)
+- Meaning:
+  - once owner finishes, skipped scope is retried to recover completeness.
+
+5. `defineProps` pass performs final completeness retry
+- Log shape:
+  - `resolve:definitions-retry-start`
+  - `resolve:definitions-retry-end`
+- Meaning:
+  - if unresolved `TSTypeReference` prop values remain after first pass,
+    wait for deferred namespace retries and re-run one final resolution pass.
+
+### Why This Combination Works
+
+- Deadlock prevention:
+  - cycle waits are no longer allowed to block forever.
+- Resolution quality:
+  - deferred namespace retry + final prop retry reduce transient incompleteness.
+- Operational clarity:
+  - timeout and cycle logs make CI issues inspectable and attributable.
