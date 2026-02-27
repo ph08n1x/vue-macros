@@ -4,6 +4,7 @@ import {
   resolveTSReferencedType,
   type TSResolvedType,
 } from './resolve-reference'
+import { apiDebug, formatDebugError, nextDebugId } from '../debug'
 import { getTSFile, resolveTSScope, type TSScope } from './scope'
 
 export const namespaceSymbol: unique symbol = Symbol('namespace')
@@ -13,6 +14,8 @@ export type TSNamespace = {
 
 const namespaceResolveTasks = new WeakMap<TSScope, Promise<void>>()
 const namespaceResolveOwners = new WeakMap<TSScope, symbol>()
+const scopeDebugIds = new WeakMap<TSScope, number>()
+const tokenDebugIds = new Map<symbol, number>()
 
 export interface NamespaceResolveOptions {
   namespaceToken?: symbol
@@ -20,6 +23,19 @@ export interface NamespaceResolveOptions {
 
 export function isTSNamespace(val: unknown): val is TSNamespace {
   return !!val && typeof val === 'object' && namespaceSymbol in val
+}
+
+function getScopeDebugLabel(scope: TSScope): string {
+  const id = scopeDebugIds.get(scope) ?? nextDebugId()
+  scopeDebugIds.set(scope, id)
+  return `${id}:${resolveTSScope(scope).file.filePath}`
+}
+
+function getTokenDebugId(token?: symbol): number | undefined {
+  if (!token) return undefined
+  const id = tokenDebugIds.get(token) ?? nextDebugId()
+  tokenDebugIds.set(token, id)
+  return id
 }
 
 /**
@@ -31,18 +47,58 @@ export async function resolveTSNamespace(
   scope: TSScope,
   options: NamespaceResolveOptions = {},
 ): Promise<void> {
+  const scopeLabel = getScopeDebugLabel(scope)
+  const requestedTokenId = getTokenDebugId(options.namespaceToken)
+  apiDebug('namespace', 'resolve:enter', {
+    scope: scopeLabel,
+    requestTokenId: requestedTokenId,
+    hasExports: !!scope.exports,
+  })
+
   const inFlight = namespaceResolveTasks.get(scope)
   if (inFlight) {
     const owner = namespaceResolveOwners.get(scope)
-    if (owner && options.namespaceToken && owner === options.namespaceToken) {
+    const ownerTokenId = getTokenDebugId(owner)
+    const reentrant =
+      !!owner && !!options.namespaceToken && owner === options.namespaceToken
+    if (reentrant) {
+      apiDebug('namespace', 'resolve:reentrant-skip', {
+        scope: scopeLabel,
+        ownerTokenId,
+        requestTokenId: requestedTokenId,
+      })
       return
     }
+
+    const waitStartedAt = Date.now()
+    apiDebug('namespace', 'resolve:wait-start', {
+      scope: scopeLabel,
+      ownerTokenId,
+      requestTokenId: requestedTokenId,
+    })
     await inFlight
+    apiDebug('namespace', 'resolve:wait-end', {
+      scope: scopeLabel,
+      ownerTokenId,
+      requestTokenId: requestedTokenId,
+      waitMs: Date.now() - waitStartedAt,
+    })
     return
   }
-  if (scope.exports) return
+  if (scope.exports) {
+    apiDebug('namespace', 'resolve:cache-hit', {
+      scope: scopeLabel,
+      requestTokenId: requestedTokenId,
+    })
+    return
+  }
 
   const namespaceToken = options.namespaceToken ?? Symbol('namespace-resolve')
+  const namespaceTokenId = getTokenDebugId(namespaceToken)
+  apiDebug('namespace', 'resolve:start', {
+    scope: scopeLabel,
+    tokenId: namespaceTokenId,
+  })
   let completeTask!: () => void
   let failTask!: (error: unknown) => void
   const task = new Promise<void>((resolve, reject) => {
@@ -65,7 +121,14 @@ export async function resolveTSNamespace(
     scope.declarations = declarations
 
     const { body, file } = resolveTSScope(scope)
-    for (const stmt of body || []) {
+    for (const [index, stmt] of (body || []).entries()) {
+      apiDebug('namespace', 'resolve:stmt', {
+        scope: scopeLabel,
+        tokenId: namespaceTokenId,
+        index,
+        stmt: stmt.type,
+      })
+
       if (
         stmt.type === 'ExportDefaultDeclaration' &&
         isTSDeclaration(stmt.declaration)
@@ -75,10 +138,29 @@ export async function resolveTSNamespace(
           type: stmt.declaration,
         }, [], { namespaceToken })
       } else if (stmt.type === 'ExportAllDeclaration') {
+        apiDebug('namespace', 'resolve:export-all', {
+          scope: scopeLabel,
+          tokenId: namespaceTokenId,
+          source: stmt.source.value,
+        })
         const resolved = await resolveDts(stmt.source.value, file.filePath)
-        if (!resolved) continue
+        if (!resolved) {
+          apiDebug('namespace', 'resolve:export-all-miss', {
+            scope: scopeLabel,
+            tokenId: namespaceTokenId,
+            source: stmt.source.value,
+          })
+          continue
+        }
 
         const sourceScope = await getTSFile(resolved)
+        apiDebug('namespace', 'resolve:export-all-hit', {
+          scope: scopeLabel,
+          tokenId: namespaceTokenId,
+          source: stmt.source.value,
+          resolved,
+          sourceScope: getScopeDebugLabel(sourceScope),
+        })
         await resolveTSNamespace(sourceScope, { namespaceToken })
 
         Object.assign(exports, sourceScope.exports!)
@@ -86,12 +168,31 @@ export async function resolveTSNamespace(
         let sourceExports: TSNamespace
 
         if (stmt.source) {
+          apiDebug('namespace', 'resolve:export-named', {
+            scope: scopeLabel,
+            tokenId: namespaceTokenId,
+            source: stmt.source.value,
+          })
           const resolved = await resolveDts(stmt.source.value, file.filePath)
-          if (!resolved) continue
+          if (!resolved) {
+            apiDebug('namespace', 'resolve:export-named-miss', {
+              scope: scopeLabel,
+              tokenId: namespaceTokenId,
+              source: stmt.source.value,
+            })
+            continue
+          }
 
-          const scope = await getTSFile(resolved)
-          await resolveTSNamespace(scope, { namespaceToken })
-          sourceExports = scope.exports!
+          const sourceScope = await getTSFile(resolved)
+          apiDebug('namespace', 'resolve:export-named-hit', {
+            scope: scopeLabel,
+            tokenId: namespaceTokenId,
+            source: stmt.source.value,
+            resolved,
+            sourceScope: getScopeDebugLabel(sourceScope),
+          })
+          await resolveTSNamespace(sourceScope, { namespaceToken })
+          sourceExports = sourceScope.exports!
         } else {
           sourceExports = declarations
         }
@@ -142,10 +243,29 @@ export async function resolveTSNamespace(
           type: stmt,
         }, [], { namespaceToken })
       } else if (stmt.type === 'ImportDeclaration') {
+        apiDebug('namespace', 'resolve:import', {
+          scope: scopeLabel,
+          tokenId: namespaceTokenId,
+          source: stmt.source.value,
+        })
         const resolved = await resolveDts(stmt.source.value, file.filePath)
-        if (!resolved) continue
+        if (!resolved) {
+          apiDebug('namespace', 'resolve:import-miss', {
+            scope: scopeLabel,
+            tokenId: namespaceTokenId,
+            source: stmt.source.value,
+          })
+          continue
+        }
 
         const importScope = await getTSFile(resolved)
+        apiDebug('namespace', 'resolve:import-hit', {
+          scope: scopeLabel,
+          tokenId: namespaceTokenId,
+          source: stmt.source.value,
+          resolved,
+          importScope: getScopeDebugLabel(importScope),
+        })
         await resolveTSNamespace(importScope, { namespaceToken })
         const exports = importScope.exports!
 
@@ -170,8 +290,19 @@ export async function resolveTSNamespace(
         }
       }
     }
+    apiDebug('namespace', 'resolve:done', {
+      scope: scopeLabel,
+      tokenId: namespaceTokenId,
+      exportCount: Object.keys(exports).length,
+      declarationCount: Object.keys(declarations).length,
+    })
     completeTask()
   } catch (error) {
+    apiDebug('namespace', 'resolve:failed', {
+      scope: scopeLabel,
+      requestTokenId: requestedTokenId,
+      error: formatDebugError(error),
+    })
     failTask(error)
     throw error
   } finally {

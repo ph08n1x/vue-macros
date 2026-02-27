@@ -15,6 +15,7 @@ import {
   type TSNamespace,
 } from './namespace'
 import { resolveTSIndexedAccessType } from './resolve'
+import { apiDebug, nextDebugId } from '../debug'
 import { resolveTSScope, type TSScope } from './scope'
 
 export interface TSResolvedType<
@@ -46,8 +47,22 @@ export async function resolveTSReferencedType(
   stacks: TSResolvedType<any>[] = [],
   options: NamespaceResolveOptions = {},
 ): Promise<TSResolvedType | TSNamespace | undefined> {
+  const requestId = nextDebugId()
   const { scope, type } = ref
+  const scopeLabel = resolveTSScope(scope).file.filePath
+  apiDebug('resolve-reference', 'resolve:start', {
+    requestId,
+    scope: scopeLabel,
+    nodeType: type.type,
+    depth: stacks.length,
+  })
   if (stacks.some((stack) => stack.scope === scope && stack.type === type)) {
+    apiDebug('resolve-reference', 'resolve:cycle', {
+      requestId,
+      scope: scopeLabel,
+      nodeType: type.type,
+      depth: stacks.length,
+    })
     return ref as any
   }
   stacks.push(ref)
@@ -55,12 +70,22 @@ export async function resolveTSReferencedType(
   switch (type.type) {
     case 'TSTypeAliasDeclaration':
     case 'TSParenthesizedType':
+      apiDebug('resolve-reference', 'resolve:unwrap', {
+        requestId,
+        scope: scopeLabel,
+        nodeType: type.type,
+      })
       return resolveTSReferencedType(
         { scope, type: type.typeAnnotation },
         stacks,
         options,
       )
     case 'TSIndexedAccessType':
+      apiDebug('resolve-reference', 'resolve:indexed-access', {
+        requestId,
+        scope: scopeLabel,
+        depth: stacks.length,
+      })
       return resolveTSIndexedAccessType({ type, scope }, stacks, options)
 
     case 'TSModuleDeclaration': {
@@ -70,6 +95,10 @@ export async function resolveTSReferencedType(
           ast: type.body,
           scope,
         }
+        apiDebug('resolve-reference', 'resolve:module-declaration', {
+          requestId,
+          scope: scopeLabel,
+        })
         await resolveTSNamespace(newScope, options)
         return newScope.exports
       }
@@ -77,8 +106,14 @@ export async function resolveTSReferencedType(
     }
   }
 
-  if (type.type !== 'Identifier' && type.type !== 'TSTypeReference')
+  if (type.type !== 'Identifier' && type.type !== 'TSTypeReference') {
+    apiDebug('resolve-reference', 'resolve:terminal', {
+      requestId,
+      scope: scopeLabel,
+      nodeType: type.type,
+    })
     return { scope, type }
+  }
 
   await resolveTSNamespace(scope, options)
   const refNames = resolveIdentifier(
@@ -92,9 +127,22 @@ export async function resolveTSReferencedType(
     if (isTSNamespace(resolved) && resolved[name]) {
       resolved = resolved[name]
     } else if (type.type === 'TSTypeReference') {
+      apiDebug('resolve-reference', 'resolve:unresolved-type-ref', {
+        requestId,
+        scope: scopeLabel,
+        reference: refNames.join('.'),
+      })
       return { type, scope }
     }
   }
 
+  apiDebug('resolve-reference', 'resolve:done', {
+    requestId,
+    scope: scopeLabel,
+    nodeType: type.type,
+    resolved:
+      !resolved || isTSNamespace(resolved) ? 'namespace-or-empty' : resolved.type.type,
+    depth: stacks.length,
+  })
   return resolved
 }

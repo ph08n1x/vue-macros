@@ -18,6 +18,7 @@ import {
   type TSResolvedType,
   type TSScope,
 } from '../ts'
+import { apiDebug, formatDebugError, nextDebugId } from '../debug'
 import { DefinitionKind, type ASTDefinition } from './types'
 import { attachNodeLoc, inferRuntimeType } from './utils'
 import type {
@@ -81,6 +82,7 @@ const builtInTypesHandlers: BuiltInTypesHandler = {
 
 export async function handleTSPropsDefinition({
   s,
+  sfc,
   file,
   offset,
 
@@ -107,11 +109,26 @@ export async function handleTSPropsDefinition({
   statement: DefinePropsStatement
   declId?: LVal
 }): Promise<TSProps> {
+  const requestId = nextDebugId()
+  const startedAt = Date.now()
+  apiDebug('props', 'handle:start', {
+    requestId,
+    filePath: sfc.filename || file.filePath,
+    typeDecl: typeDeclRaw.type,
+  })
+
   const { definitions, definitionsAst } = await resolveDefinitions({
     type: typeDeclRaw,
     scope: file,
   })
   const { defaults, defaultsAst } = resolveDefaults(defaultsDeclRaw)
+  apiDebug('props', 'handle:resolved-definitions', {
+    requestId,
+    definitionCount: Object.keys(definitions).length,
+    astType: definitionsAst.ast.type,
+    hasDefaults: !!defaults || !!defaultsAst,
+    durationMs: Date.now() - startedAt,
+  })
 
   const addProp: TSProps['addProp'] = (name, value, optional) => {
     const { key, signature, valueAst, signatureAst } = buildNewProp(
@@ -270,6 +287,13 @@ export async function handleTSPropsDefinition({
     return props
   }
 
+  apiDebug('props', 'handle:done', {
+    requestId,
+    filePath: sfc.filename || file.filePath,
+    definitionCount: Object.keys(definitions).length,
+    durationMs: Date.now() - startedAt,
+  })
+
   return {
     kind: DefinitionKind.TS,
     definitions,
@@ -289,6 +313,11 @@ export async function handleTSPropsDefinition({
   }
 
   async function resolveUnion(definitionsAst: TSUnionType, scope: TSScope) {
+    apiDebug('props', 'resolve:union-start', {
+      requestId,
+      filePath: file.filePath,
+      types: definitionsAst.types.length,
+    })
     const unionDefs: TSProps['definitions'][] = []
     const keys = new Set<string>()
     for (const type of definitionsAst.types) {
@@ -373,16 +402,27 @@ export async function handleTSPropsDefinition({
       }
     }
 
-    return {
+    const resolved = {
       definitions: results,
       definitionsAst: buildDefinition({ scope, type: definitionsAst }),
     }
+    apiDebug('props', 'resolve:union-done', {
+      requestId,
+      filePath: file.filePath,
+      definitions: Object.keys(results).length,
+    })
+    return resolved
   }
 
   async function resolveIntersection(
     definitionsAst: TSIntersectionType,
     scope: TSScope,
   ) {
+    apiDebug('props', 'resolve:intersection-start', {
+      requestId,
+      filePath: file.filePath,
+      types: definitionsAst.types.length,
+    })
     const results: TSProps['definitions'] = Object.create(null)
     for (const type of definitionsAst.types) {
       const defMap = await resolveDefinitions({ type, scope }).then(
@@ -403,10 +443,16 @@ export async function handleTSPropsDefinition({
       }
     }
 
-    return {
+    const resolved = {
       definitions: results,
       definitionsAst: buildDefinition({ scope, type: definitionsAst }),
     }
+    apiDebug('props', 'resolve:intersection-done', {
+      requestId,
+      filePath: file.filePath,
+      definitions: Object.keys(results).length,
+    })
+    return resolved
   }
 
   async function resolveNormal(properties: TSProperties) {
@@ -445,6 +491,15 @@ export async function handleTSPropsDefinition({
     definitions: TSProps['definitions']
     definitionsAst: TSProps['definitionsAst']
   }> {
+    const resolveId = nextDebugId()
+    const startedAt = Date.now()
+    apiDebug('props', 'resolve:definitions-start', {
+      requestId,
+      resolveId,
+      filePath: file.filePath,
+      nodeType: typeDeclRaw.type.type,
+    })
+
     let resolved:
       | TSResolvedType
       | TSResolvedType<TSType>
@@ -453,65 +508,93 @@ export async function handleTSPropsDefinition({
 
     let builtInTypesHandler: BuiltInTypesHandler[string] | undefined
 
-    if (
-      resolved &&
-      !isTSNamespace(resolved) &&
-      resolved.type.type === 'TSTypeReference' &&
-      resolved.type.typeName.type === 'Identifier'
-    ) {
-      const typeName = resolved.type.typeName.name
+    try {
+      if (
+        resolved &&
+        !isTSNamespace(resolved) &&
+        resolved.type.type === 'TSTypeReference' &&
+        resolved.type.typeName.type === 'Identifier'
+      ) {
+        const typeName = resolved.type.typeName.name
 
-      let type: TSType | undefined
-      if (typeName in builtInTypesHandlers) {
-        builtInTypesHandler = builtInTypesHandlers[typeName]
-        type = builtInTypesHandler.handleType(resolved.type)
+        let type: TSType | undefined
+        if (typeName in builtInTypesHandlers) {
+          builtInTypesHandler = builtInTypesHandlers[typeName]
+          type = builtInTypesHandler.handleType(resolved.type)
+          apiDebug('props', 'resolve:definitions-built-in', {
+            requestId,
+            resolveId,
+            filePath: file.filePath,
+            typeName,
+            hasTypeOverride: !!type,
+          })
+        }
+
+        if (type)
+          resolved = await resolveTSReferencedType({
+            type,
+            scope: resolved.scope,
+          })
       }
 
-      if (type)
-        resolved = await resolveTSReferencedType({
-          type,
-          scope: resolved.scope,
-        })
-    }
-
-    if (!resolved || isTSNamespace(resolved)) {
-      throw new SyntaxError(`Cannot resolve TS definition.`)
-    }
-
-    const { type: definitionsAst, scope } = resolved
-    if (definitionsAst.type === 'TSIntersectionType') {
-      return resolveIntersection(definitionsAst, scope)
-    } else if (definitionsAst.type === 'TSUnionType') {
-      return resolveUnion(definitionsAst, scope)
-    } else if (
-      definitionsAst.type !== 'TSInterfaceDeclaration' &&
-      definitionsAst.type !== 'TSTypeLiteral' &&
-      definitionsAst.type !== 'TSMappedType'
-    ) {
-      if (definitionsAst.type === 'TSTypeReference') {
-        throw new SyntaxError(
-          `Cannot resolve TS type: ${resolveIdentifier(
-            definitionsAst.typeName,
-          ).join('.')}`,
-        )
-      } else {
-        throw new SyntaxError(
-          `Cannot resolve TS definition: ${definitionsAst.type}`,
-        )
+      if (!resolved || isTSNamespace(resolved)) {
+        throw new SyntaxError(`Cannot resolve TS definition.`)
       }
-    }
 
-    let properties = await resolveTSProperties({
-      scope,
-      type: definitionsAst,
-    })
+      const { type: definitionsAst, scope } = resolved
+      if (definitionsAst.type === 'TSIntersectionType') {
+        return resolveIntersection(definitionsAst, scope)
+      } else if (definitionsAst.type === 'TSUnionType') {
+        return resolveUnion(definitionsAst, scope)
+      } else if (
+        definitionsAst.type !== 'TSInterfaceDeclaration' &&
+        definitionsAst.type !== 'TSTypeLiteral' &&
+        definitionsAst.type !== 'TSMappedType'
+      ) {
+        if (definitionsAst.type === 'TSTypeReference') {
+          throw new SyntaxError(
+            `Cannot resolve TS type: ${resolveIdentifier(
+              definitionsAst.typeName,
+            ).join('.')}`,
+          )
+        } else {
+          throw new SyntaxError(
+            `Cannot resolve TS definition: ${definitionsAst.type}`,
+          )
+        }
+      }
 
-    if (builtInTypesHandler?.handleTSProperties)
-      properties = builtInTypesHandler.handleTSProperties(properties)
+      let properties = await resolveTSProperties({
+        scope,
+        type: definitionsAst,
+      })
 
-    return {
-      definitions: await resolveNormal(properties),
-      definitionsAst: buildDefinition({ scope, type: definitionsAst }),
+      if (builtInTypesHandler?.handleTSProperties)
+        properties = builtInTypesHandler.handleTSProperties(properties)
+
+      const finalDefinitions = await resolveNormal(properties)
+      apiDebug('props', 'resolve:definitions-done', {
+        requestId,
+        resolveId,
+        filePath: file.filePath,
+        nodeType: definitionsAst.type,
+        definitions: Object.keys(finalDefinitions).length,
+        durationMs: Date.now() - startedAt,
+      })
+      return {
+        definitions: finalDefinitions,
+        definitionsAst: buildDefinition({ scope, type: definitionsAst }),
+      }
+    } catch (error) {
+      apiDebug('props', 'resolve:definitions-failed', {
+        requestId,
+        resolveId,
+        filePath: file.filePath,
+        nodeType: typeDeclRaw.type.type,
+        durationMs: Date.now() - startedAt,
+        error: formatDebugError(error),
+      })
+      throw error
     }
   }
 

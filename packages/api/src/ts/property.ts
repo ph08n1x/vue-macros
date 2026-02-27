@@ -9,6 +9,8 @@ import {
   resolveTSReferencedType,
   type TSResolvedType,
 } from './resolve-reference'
+import { apiDebug, nextDebugId } from '../debug'
+import { resolveTSScope } from './scope'
 import type {
   Node,
   TSCallSignatureDeclaration,
@@ -90,11 +92,19 @@ export async function resolveTSProperties({
   | TSMappedType
   | TSFunctionType
 >): Promise<TSProperties> {
+  const requestId = nextDebugId()
+  const scopeLabel = resolveTSScope(scope).file.filePath
+  apiDebug('properties', 'resolve:start', {
+    requestId,
+    scope: scopeLabel,
+    nodeType: type.type,
+  })
+
   switch (type.type) {
     case 'TSInterfaceBody':
-      return resolveTypeElements(scope, type.body)
+      return finish(resolveTypeElements(scope, type.body))
     case 'TSTypeLiteral':
-      return resolveTypeElements(scope, type.members)
+      return finish(resolveTypeElements(scope, type.members))
     case 'TSInterfaceDeclaration': {
       let properties = resolveTypeElements(scope, type.body.body)
       if (type.extends) {
@@ -120,7 +130,7 @@ export async function resolveTSProperties({
           properties = mergeTSProperties(ext, properties)
         }
       }
-      return properties
+      return finish(properties)
     }
     case 'TSIntersectionType': {
       let properties: TSProperties = {
@@ -140,7 +150,7 @@ export async function resolveTSProperties({
           await resolveTSProperties(resolved),
         )
       }
-      return properties
+      return finish(properties)
     }
     case 'TSMappedType': {
       const properties: TSProperties = {
@@ -149,13 +159,13 @@ export async function resolveTSProperties({
         methods: Object.create(null),
         properties: Object.create(null),
       }
-      if (!type.typeParameter.constraint) return properties
+      if (!type.typeParameter.constraint) return finish(properties)
 
       const constraint = await resolveTSReferencedType({
         type: type.typeParameter.constraint,
         scope,
       })
-      if (!constraint || isTSNamespace(constraint)) return properties
+      if (!constraint || isTSNamespace(constraint)) return finish(properties)
 
       const types = resolveMaybeTSUnion(constraint.type)
       for (const subType of types) {
@@ -181,7 +191,7 @@ export async function resolveTSProperties({
         }
       }
 
-      return properties
+      return finish(properties)
     }
     case 'TSFunctionType': {
       const properties: TSProperties = {
@@ -190,7 +200,7 @@ export async function resolveTSProperties({
         methods: Object.create(null),
         properties: Object.create(null),
       }
-      return properties
+      return finish(properties)
     }
     default:
       // @ts-expect-error type is never
@@ -203,6 +213,19 @@ export async function resolveTSProperties({
     TSInterfaceDeclaration | TSTypeLiteral | TSIntersectionType
   > {
     return !isTSNamespace(node) && checkForTSProperties(node?.type)
+  }
+
+  function finish(properties: TSProperties): TSProperties {
+    apiDebug('properties', 'resolve:done', {
+      requestId,
+      scope: scopeLabel,
+      nodeType: type.type,
+      methods: Object.keys(properties.methods).length,
+      properties: Object.keys(properties.properties).length,
+      callSignatures: properties.callSignatures.length,
+      constructSignatures: properties.constructSignatures.length,
+    })
+    return properties
   }
 }
 

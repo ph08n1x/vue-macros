@@ -7,6 +7,7 @@ import {
   type MagicStringAST,
   type SFC,
 } from '@vue-macros/common'
+import { apiDebug } from '../debug'
 import type { TSFile } from '../ts'
 import { handleTSEmitsDefinition, type Emits } from './emits'
 import {
@@ -32,6 +33,12 @@ export async function analyzeSFC(
   if (!sfc.scriptSetup) throw new Error('Only <script setup> is supported')
 
   const { scriptSetup } = sfc
+  const analyzeStartedAt = Date.now()
+  apiDebug('analyze', 'sfc:start', {
+    filePath: sfc.filename,
+    lang: sfc.scriptSetup.lang || 'js',
+    codeLength: scriptSetup.content.length,
+  })
 
   const body = babelParse(
     scriptSetup.content,
@@ -85,6 +92,13 @@ export async function analyzeSFC(
     }
   }
 
+  apiDebug('analyze', 'sfc:done', {
+    filePath: sfc.filename,
+    durationMs: Date.now() - analyzeStartedAt,
+    hasProps: !!props,
+    hasEmits: !!emits,
+  })
+
   return {
     props,
     emits,
@@ -109,6 +123,11 @@ export async function analyzeSFC(
 
     const typeDeclRaw = defineProps.typeParameters?.params[0]
     if (typeDeclRaw) {
+      const startedAt = Date.now()
+      apiDebug('analyze', 'props:resolve-start', {
+        filePath: sfc.filename,
+        nodeType: typeDeclRaw.type,
+      })
       props = await handleTSPropsDefinition({
         s,
         file,
@@ -123,6 +142,10 @@ export async function analyzeSFC(
 
         statement,
         declId,
+      })
+      apiDebug('analyze', 'props:resolve-done', {
+        filePath: sfc.filename,
+        durationMs: Date.now() - startedAt,
       })
     } else {
       // TODO: runtime
