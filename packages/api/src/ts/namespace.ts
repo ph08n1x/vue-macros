@@ -16,6 +16,7 @@ const namespaceResolveTasks = new WeakMap<TSScope, Promise<void>>()
 const namespaceResolveOwners = new WeakMap<TSScope, symbol>()
 const scopeDebugIds = new WeakMap<TSScope, number>()
 const tokenDebugIds = new Map<symbol, number>()
+const tokenWaitGraph = new Map<symbol, Set<symbol>>()
 
 export interface NamespaceResolveOptions {
   namespaceToken?: symbol
@@ -36,6 +37,39 @@ function getTokenDebugId(token?: symbol): number | undefined {
   const id = tokenDebugIds.get(token) ?? nextDebugId()
   tokenDebugIds.set(token, id)
   return id
+}
+
+function wouldCreateWaitCycle(requestToken: symbol, ownerToken: symbol): boolean {
+  if (requestToken === ownerToken) return true
+
+  const visited = new Set<symbol>()
+  const stack: symbol[] = [ownerToken]
+  while (stack.length > 0) {
+    const current = stack.pop()!
+    if (current === requestToken) return true
+    if (visited.has(current)) continue
+    visited.add(current)
+
+    const waitsFor = tokenWaitGraph.get(current)
+    if (!waitsFor) continue
+    waitsFor.forEach((nextToken) => stack.push(nextToken))
+  }
+
+  return false
+}
+
+function addWaitEdge(requestToken: symbol, ownerToken: symbol): void {
+  if (requestToken === ownerToken) return
+  const waitsFor = tokenWaitGraph.get(requestToken) ?? new Set()
+  waitsFor.add(ownerToken)
+  tokenWaitGraph.set(requestToken, waitsFor)
+}
+
+function removeWaitEdge(requestToken: symbol, ownerToken: symbol): void {
+  const waitsFor = tokenWaitGraph.get(requestToken)
+  if (!waitsFor) return
+  waitsFor.delete(ownerToken)
+  if (waitsFor.size === 0) tokenWaitGraph.delete(requestToken)
 }
 
 /**
@@ -59,8 +93,9 @@ export async function resolveTSNamespace(
   if (inFlight) {
     const owner = namespaceResolveOwners.get(scope)
     const ownerTokenId = getTokenDebugId(owner)
+    const requestToken = options.namespaceToken
     const reentrant =
-      !!owner && !!options.namespaceToken && owner === options.namespaceToken
+      !!owner && !!requestToken && owner === requestToken
     if (reentrant) {
       apiDebug('namespace', 'resolve:reentrant-skip', {
         scope: scopeLabel,
@@ -70,19 +105,38 @@ export async function resolveTSNamespace(
       return
     }
 
+    if (owner && requestToken && wouldCreateWaitCycle(requestToken, owner)) {
+      apiDebug('namespace', 'resolve:wait-cycle-skip', {
+        scope: scopeLabel,
+        ownerTokenId,
+        requestTokenId: requestedTokenId,
+      })
+      return
+    }
+
+    if (owner && requestToken) {
+      addWaitEdge(requestToken, owner)
+    }
+
     const waitStartedAt = Date.now()
     apiDebug('namespace', 'resolve:wait-start', {
       scope: scopeLabel,
       ownerTokenId,
       requestTokenId: requestedTokenId,
     })
-    await inFlight
-    apiDebug('namespace', 'resolve:wait-end', {
-      scope: scopeLabel,
-      ownerTokenId,
-      requestTokenId: requestedTokenId,
-      waitMs: Date.now() - waitStartedAt,
-    })
+    try {
+      await inFlight
+      apiDebug('namespace', 'resolve:wait-end', {
+        scope: scopeLabel,
+        ownerTokenId,
+        requestTokenId: requestedTokenId,
+        waitMs: Date.now() - waitStartedAt,
+      })
+    } finally {
+      if (owner && requestToken) {
+        removeWaitEdge(requestToken, owner)
+      }
+    }
     return
   }
   if (scope.exports) {
