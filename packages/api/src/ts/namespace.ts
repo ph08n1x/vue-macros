@@ -17,6 +17,16 @@ const namespaceResolveOwners = new WeakMap<TSScope, symbol>()
 const scopeDebugIds = new WeakMap<TSScope, number>()
 const tokenDebugIds = new Map<symbol, number>()
 const tokenWaitGraph = new Map<symbol, Set<symbol>>()
+const cycleRetryTokensByScope = new WeakMap<TSScope, Set<symbol>>()
+const cycleRetryTasks = new Set<Promise<void>>()
+const waitWarnMs = Number.parseInt(
+  process.env.VUE_MACROS_API_WAIT_WARN_MS ?? '10000',
+  10,
+)
+const deferredWaitTimeoutMs = Number.parseInt(
+  process.env.VUE_MACROS_API_DEFERRED_WAIT_TIMEOUT_MS ?? '2000',
+  10,
+)
 
 export interface NamespaceResolveOptions {
   namespaceToken?: symbol
@@ -72,6 +82,97 @@ function removeWaitEdge(requestToken: symbol, ownerToken: symbol): void {
   if (waitsFor.size === 0) tokenWaitGraph.delete(requestToken)
 }
 
+function scheduleCycleRetry(
+  scope: TSScope,
+  inFlight: Promise<void>,
+  ownerTokenId: number | undefined,
+  requestToken: symbol,
+  requestTokenId: number | undefined,
+): void {
+  const currentTokens = cycleRetryTokensByScope.get(scope) ?? new Set()
+  if (currentTokens.has(requestToken)) return
+  currentTokens.add(requestToken)
+  cycleRetryTokensByScope.set(scope, currentTokens)
+
+  apiDebug('namespace', 'resolve:wait-cycle-retry-scheduled', {
+    scope: getScopeDebugLabel(scope),
+    ownerTokenId,
+    requestTokenId,
+  })
+
+  const task = (async () => {
+    try {
+      await inFlight
+      await resolveTSNamespace(scope, { namespaceToken: requestToken })
+      apiDebug('namespace', 'resolve:wait-cycle-retry-done', {
+        scope: getScopeDebugLabel(scope),
+        ownerTokenId,
+        requestTokenId,
+      })
+    } catch (error) {
+      apiDebug('namespace', 'resolve:wait-cycle-retry-failed', {
+        scope: getScopeDebugLabel(scope),
+        ownerTokenId,
+        requestTokenId,
+        error: formatDebugError(error),
+      })
+    } finally {
+      const tokens = cycleRetryTokensByScope.get(scope)
+      if (tokens) {
+        tokens.delete(requestToken)
+        if (tokens.size === 0) cycleRetryTokensByScope.delete(scope)
+      }
+    }
+  })()
+  cycleRetryTasks.add(task)
+  task.finally(() => {
+    cycleRetryTasks.delete(task)
+  })
+}
+
+export async function waitForDeferredNamespaceResolutions(
+  timeoutMs: number = deferredWaitTimeoutMs,
+): Promise<void> {
+  const tasks = [...cycleRetryTasks]
+  if (tasks.length === 0) return
+
+  apiDebug('namespace', 'resolve:deferred-await-start', {
+    taskCount: tasks.length,
+    timeoutMs,
+  })
+
+  const settle = Promise.allSettled(tasks).then(() => undefined)
+  if (timeoutMs > 0 && !Number.isNaN(timeoutMs)) {
+    let timedOut = false
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined
+    await Promise.race([
+      settle,
+      new Promise<void>(
+        (resolve: (value: void | PromiseLike<void>) => void) => {
+          timeoutHandle = setTimeout(() => {
+            timedOut = true
+            resolve()
+          }, timeoutMs)
+        },
+      ),
+    ])
+    if (timeoutHandle) clearTimeout(timeoutHandle)
+    apiDebug('namespace', 'resolve:deferred-await-end', {
+      taskCount: tasks.length,
+      timeoutMs,
+      timedOut,
+    })
+    return
+  }
+
+  await settle
+  apiDebug('namespace', 'resolve:deferred-await-end', {
+    taskCount: tasks.length,
+    timeoutMs: 0,
+    timedOut: false,
+  })
+}
+
 /**
  * Get exports of the TS file.
  *
@@ -111,6 +212,13 @@ export async function resolveTSNamespace(
         ownerTokenId,
         requestTokenId: requestedTokenId,
       })
+      scheduleCycleRetry(
+        scope,
+        inFlight,
+        ownerTokenId,
+        requestToken,
+        requestedTokenId,
+      )
       return
     }
 
@@ -124,6 +232,18 @@ export async function resolveTSNamespace(
       ownerTokenId,
       requestTokenId: requestedTokenId,
     })
+    let waitTimer: ReturnType<typeof setTimeout> | undefined
+    if (waitWarnMs > 0 && !Number.isNaN(waitWarnMs)) {
+      waitTimer = setTimeout(() => {
+        apiDebug('namespace', 'resolve:wait-timeout', {
+          scope: scopeLabel,
+          ownerTokenId,
+          requestTokenId: requestedTokenId,
+          waitMs: waitWarnMs,
+          outstandingWaitEdges: tokenWaitGraph.size,
+        })
+      }, waitWarnMs)
+    }
     try {
       await inFlight
       apiDebug('namespace', 'resolve:wait-end', {
@@ -133,6 +253,7 @@ export async function resolveTSNamespace(
         waitMs: Date.now() - waitStartedAt,
       })
     } finally {
+      if (waitTimer) clearTimeout(waitTimer)
       if (owner && requestToken) {
         removeWaitEdge(requestToken, owner)
       }

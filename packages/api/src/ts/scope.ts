@@ -29,19 +29,30 @@ export interface TSModule extends TSScopeBase {
 export type TSScope = TSFile | TSModule
 
 export const tsFileCache: Record<string, TSFile> = Object.create(null)
+const tsFileTasks: Record<string, Promise<TSFile>> = Object.create(null)
 export async function getTSFile(filePath: string): Promise<TSFile> {
   if (tsFileCache[filePath]) return tsFileCache[filePath]
-  const content = await readFile(filePath, 'utf-8')
-  const { code, lang } = getFileCodeAndLang(content, filePath)
+  if (!tsFileTasks[filePath]) {
+    tsFileTasks[filePath] = (async () => {
+      const content = await readFile(filePath, 'utf-8')
+      const { code, lang } = getFileCodeAndLang(content, filePath)
 
-  return (tsFileCache[filePath] = {
-    kind: 'file',
-    filePath,
-    content,
-    ast: REGEX_SUPPORTED_EXT.test(filePath)
-      ? babelParse(code, lang, { cache: true }).body
-      : undefined,
-  })
+      const file: TSFile = {
+        kind: 'file',
+        filePath,
+        content,
+        ast: REGEX_SUPPORTED_EXT.test(filePath)
+          ? babelParse(code, lang, { cache: true }).body
+          : undefined,
+      }
+      tsFileCache[filePath] = file
+      return file
+    })().finally(() => {
+      delete tsFileTasks[filePath]
+    })
+  }
+
+  return tsFileTasks[filePath]
 }
 
 interface ResolvedTSScope {

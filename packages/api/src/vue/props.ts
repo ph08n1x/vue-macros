@@ -12,6 +12,7 @@ import {
   resolveTSProperties,
   resolveTSReferencedType,
   resolveTSScope,
+  waitForDeferredNamespaceResolutions,
   type TSFile,
   type TSNamespace,
   type TSProperties,
@@ -485,6 +486,15 @@ export async function handleTSPropsDefinition({
     return definitions
   }
 
+  function countUnresolvedTypeReferences(definitions: TSProps['definitions']) {
+    let count = 0
+    for (const definition of Object.values(definitions)) {
+      if (definition.type !== 'property') continue
+      if (definition.value?.ast.type === 'TSTypeReference') count += 1
+    }
+    return count
+  }
+
   async function resolveDefinitions(
     typeDeclRaw: TSResolvedType<TSType>,
   ): Promise<{
@@ -572,7 +582,25 @@ export async function handleTSPropsDefinition({
       if (builtInTypesHandler?.handleTSProperties)
         properties = builtInTypesHandler.handleTSProperties(properties)
 
-      const finalDefinitions = await resolveNormal(properties)
+      let finalDefinitions = await resolveNormal(properties)
+      const unresolvedBeforeRetry =
+        countUnresolvedTypeReferences(finalDefinitions)
+      if (unresolvedBeforeRetry > 0) {
+        apiDebug('props', 'resolve:definitions-retry-start', {
+          requestId,
+          resolveId,
+          filePath: file.filePath,
+          unresolvedTypeReferences: unresolvedBeforeRetry,
+        })
+        await waitForDeferredNamespaceResolutions()
+        finalDefinitions = await resolveNormal(properties)
+        apiDebug('props', 'resolve:definitions-retry-end', {
+          requestId,
+          resolveId,
+          filePath: file.filePath,
+          unresolvedTypeReferences: countUnresolvedTypeReferences(finalDefinitions),
+        })
+      }
       apiDebug('props', 'resolve:definitions-done', {
         requestId,
         resolveId,

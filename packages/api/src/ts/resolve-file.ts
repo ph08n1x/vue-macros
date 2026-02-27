@@ -5,6 +5,7 @@ import type { ResolverFactory } from 'oxc-resolver'
 import type { ModuleNode, Plugin } from 'vite'
 
 let typesResolver: ResolverFactory
+let typesResolverTask: Promise<ResolverFactory> | undefined
 
 const referencedFiles = new Map<string /* file */, Set<string /* importer */>>()
 
@@ -21,6 +22,7 @@ const resolveCache = new Map<
   string /* importer */,
   Map<string /* id */, string /* result */>
 >()
+const resolveInFlight = new Map<string, Promise<string | undefined>>()
 
 export async function resolveDts(
   id: string,
@@ -44,63 +46,93 @@ export async function resolveDts(
     importer,
   })
 
-  if (!typesResolver) {
+  const inFlightKey = `${importer}\n${id}`
+  const inFlight = resolveInFlight.get(inFlightKey)
+  if (inFlight) {
+    apiDebug('resolve-file', 'resolve:singleflight-join', {
+      requestId,
+      id,
+      importer,
+    })
+    return inFlight
+  }
+
+  const task = (async (): Promise<string | undefined> => {
     const startedAt = Date.now()
-    const { ResolverFactory } = await import('oxc-resolver')
-    typesResolver = new ResolverFactory({
-      mainFields: ['types'],
-      conditionNames: ['types', 'import'],
-      extensions: ['.d.ts', '.ts'],
-    })
-    apiDebug('resolve-file', 'resolver:init', {
-      requestId,
-      durationMs: Date.now() - startedAt,
-    })
-  }
+    if (!typesResolver) {
+      if (!typesResolverTask) {
+        typesResolverTask = (async () => {
+          const { ResolverFactory } = await import('oxc-resolver')
+          return new ResolverFactory({
+            mainFields: ['types'],
+            conditionNames: ['types', 'import'],
+            extensions: ['.d.ts', '.ts'],
+          })
+        })()
+      }
+      try {
+        typesResolver = await typesResolverTask
+      } catch (error) {
+        typesResolverTask = undefined
+        throw error
+      }
+      apiDebug('resolve-file', 'resolver:init', {
+        requestId,
+        durationMs: Date.now() - startedAt,
+      })
+    }
 
-  const startedAt = Date.now()
-  let error: unknown
-  let resolved: string | undefined
+    const resolveStartedAt = Date.now()
+    let error: unknown
+    let resolved: string | undefined
+    try {
+      ;({ error, path: resolved } = await typesResolver.async(
+        path.dirname(importer),
+        id,
+      ))
+    } catch (resolveError) {
+      apiDebug('resolve-file', 'resolve:error', {
+        requestId,
+        id,
+        importer,
+        durationMs: Date.now() - resolveStartedAt,
+        error: formatDebugError(resolveError),
+      })
+      throw resolveError
+    }
+    if (error || !resolved) {
+      apiDebug('resolve-file', 'resolve:miss', {
+        requestId,
+        id,
+        importer,
+        durationMs: Date.now() - resolveStartedAt,
+        error: error ? formatDebugError(error) : undefined,
+      })
+      return
+    }
+
+    collectReferencedFile(importer, resolved)
+    if (resolveCache.has(importer)) {
+      resolveCache.get(importer)!.set(id, resolved)
+    } else {
+      resolveCache.set(importer, new Map([[id, resolved]]))
+    }
+    apiDebug('resolve-file', 'resolve:hit', {
+      requestId,
+      id,
+      importer,
+      resolved,
+      durationMs: Date.now() - resolveStartedAt,
+    })
+    return resolved
+  })()
+
+  resolveInFlight.set(inFlightKey, task)
   try {
-    ;({ error, path: resolved } = await typesResolver.async(
-      path.dirname(importer),
-      id,
-    ))
-  } catch (resolveError) {
-    apiDebug('resolve-file', 'resolve:error', {
-      requestId,
-      id,
-      importer,
-      durationMs: Date.now() - startedAt,
-      error: formatDebugError(resolveError),
-    })
-    throw resolveError
+    return await task
+  } finally {
+    resolveInFlight.delete(inFlightKey)
   }
-  if (error || !resolved) {
-    apiDebug('resolve-file', 'resolve:miss', {
-      requestId,
-      id,
-      importer,
-      durationMs: Date.now() - startedAt,
-      error: error ? formatDebugError(error) : undefined,
-    })
-    return
-  }
-
-  collectReferencedFile(importer, resolved)
-  if (resolveCache.has(importer)) {
-    resolveCache.get(importer)!.set(id, resolved)
-  } else {
-    resolveCache.set(importer, new Map([[id, resolved]]))
-  }
-  apiDebug('resolve-file', 'resolve:hit', {
-    requestId,
-    id,
-    importer,
-    resolved,
-    durationMs: Date.now() - startedAt,
-  })
-  return resolved
 }
 
 export const resolveDtsHMR: NonNullable<Plugin['handleHotUpdate']> = ({
